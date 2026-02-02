@@ -6,6 +6,7 @@
 
 $Macro SRCDIR		"..\.."
 $Macro OUTBINDIR	"$SRCDIR\..\game\bin"
+$Macro OUTBINNAME	"vvis_dll_cuda"
 
 $Include "$SRCDIR\vpc_scripts\source_dll_base.vpc"
 
@@ -20,9 +21,12 @@ $Configuration
 
 	$Linker
 	{
-		$AdditionalDependencies				"$BASE odbc32.lib odbccp32.lib ws2_32.lib"
+		$AdditionalDependencies				"$BASE odbc32.lib odbccp32.lib ws2_32.lib cudart.lib pdh.lib nvml.lib"
+		$AdditionalLibraryDirectories		"$BASE;$(CUDA_PATH)\lib\x64"
 	}
 }
+
+$Include "$SRCDIR\vpc_scripts\cuda.vpc"
 
 $Project "VVIS"
 {
@@ -43,6 +47,7 @@ $Project "VVIS"
 		$File	"..\common\filesystem_tools.cpp" [!$WIN32]
 		$File	"..\common\MySqlDatabase.cpp"
 		$File	"..\common\pacifier.cpp"
+		$File	"..\common\profiler.cpp"
 		$File	"$SRCDIR\public\scratchpad3d.cpp"
 		$File	"..\common\scratchpad_helpers.cpp"
 		$File	"..\common\scriplib.cpp"
@@ -51,6 +56,7 @@ $Project "VVIS"
 		$File	"..\common\tools_minidump.h"
 		$File	"..\common\vmpi_tools_shared.cpp" [$WIN32]
 		$File	"vvis.cpp"
+		$File	"vvis_cuda.cu"
 		$File	"WaterDist.cpp"
 		$File	"$SRCDIR\public\zip_utils.cpp"
 	}
@@ -76,6 +82,7 @@ $Project "VVIS"
 		$File	"mpivis.h" [$WIN32]
 		$File	"..\common\MySqlDatabase.h"
 		$File	"..\common\pacifier.h"
+		$File	"..\common\profiler.h"
 		$File	"..\common\scriplib.h"
 		$File	"$SRCDIR\public\tier1\strtools.h"
 		$File	"..\common\threads.h"
@@ -89,6 +96,7 @@ $Project "VVIS"
 		$File	"$SRCDIR\public\mathlib\vector.h"
 		$File	"$SRCDIR\public\mathlib\vector2d.h"
 		$File	"vis.h"
+		$File	"vvis_cuda.h"
 		$File	"..\vmpi\vmpi_distribute_work.h" [$WIN32]
 		$File	"..\common\vmpi_tools_shared.h" [$WIN32]
 		$File	"$SRCDIR\public\vstdlib\vstdlib.h"

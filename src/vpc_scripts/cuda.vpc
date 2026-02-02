@@ -1,0 +1,22 @@
+//-----------------------------------------------------------------------------
+//	CUDA.VPC
+//
+//	Project Script for CUDA integration (compiling to .obj)
+//-----------------------------------------------------------------------------
+
+$Configuration
+{
+	$Compiler
+	{
+		$AdditionalIncludeDirectories		"$BASE;$(CUDA_PATH)\include"
+	}
+}
+
+// Custom build rule for .cu files - Compiles to OBJ
+$CustomBuildStep "cu"
+{
+	$Description	"NVCC Compiling $(InputFileName)..."
+	// Note: We expect the input file path to be passed as $(InputPath) and output via -o
+	$CommandLine	"call $SRCDIR\vpc_scripts\nvcc_compile.bat -DCOMPILER_MSVC -DCOMPILER_MSVC64 -I$SRCDIR\common -I$SRCDIR\public -I$SRCDIR\public\tier0 -I$SRCDIR\public\tier1 -I$SRCDIR\utils\common -o $(IntDir)\$(InputName).obj $(InputPath)"
+	$Outputs		"$(IntDir)\$(InputName).obj"
+}
