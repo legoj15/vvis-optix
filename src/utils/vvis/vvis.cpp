@@ -1006,9 +1006,6 @@ int RunVVis(int argc, char **argv) {
 
   verbose = false;
 
-  LoadCmdLineFromFile(argc, argv, source, "vvis");
-  int i = ParseCommandLine(argc, argv);
-
   CmdLib_InitFileSystem(argv[argc - 1]);
 
   // The ExpandPath is just for VMPI. VMPI's file system needs the basedir in
@@ -1027,6 +1024,9 @@ int RunVVis(int argc, char **argv) {
   // Source is just the mapfile without an extension at this point...
   V_strncpy(source, mapFile, sizeof(mapFile));
   V_StripExtension(source, source, sizeof(source));
+
+  LoadCmdLineFromFile(argc, argv, source, "vvis");
+  int i = ParseCommandLine(argc, argv);
 
   if (i != argc - 1) {
     PrintUsage(argc, argv);
