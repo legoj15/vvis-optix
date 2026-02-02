@@ -13,9 +13,33 @@ if "%CUDA_PATH%"=="" (
 
 set "CUDA_BIN_PATH=%CUDA_PATH%\bin"
 
-rem Use the explicit path to cl.exe
-rem Setup VS environment vars
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+rem Use vswhere to find the latest Visual Studio installation (VS 2022 to VS 2026)
+set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+if not exist "%VSWHERE_PATH%" (
+    echo Error: vswhere.exe not found at %VSWHERE_PATH%
+    exit /b 1
+)
+
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE_PATH%" -latest -version "[17.0,30.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+    set "VS_INSTALL_DIR=%%i"
+)
+
+if "%VS_INSTALL_DIR%"=="" (
+    echo Error: Visual Studio 2022/2026 with VC++ Tools not found.
+    exit /b 1
+)
+
+echo Found Visual Studio at: %VS_INSTALL_DIR%
+
+set "VCVARS_PATH=%VS_INSTALL_DIR%\VC\Auxiliary\Build\vcvars64.bat"
+
+if not exist "%VCVARS_PATH%" (
+    echo Error: vcvars64.bat not found at %VCVARS_PATH%
+    exit /b 1
+)
+
+call "%VCVARS_PATH%"
 
 rem Use cl.exe from path (set by vcvars)
 set "CL_PATH=cl.exe"
