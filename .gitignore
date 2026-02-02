@@ -134,6 +134,11 @@ x86/
 [Aa][Rr][Mm]64/
 bld/
 [Bb]in/
+!game/bin/
+!game/bin/x64/
+game/bin/x64/*
+!game/bin/x64/test_vvis*
+!game/bin/x64/bsp_unit_tests/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
