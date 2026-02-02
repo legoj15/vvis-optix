@@ -13,10 +13,6 @@ $Project "mathlib"
 	"mathlib\mathlib.vpc"
 }
 
-$Project "raytrace"
-{
-	"raytrace\raytrace.vpc"
-}
 
 $Project "tier1"
 {

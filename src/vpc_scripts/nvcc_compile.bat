@@ -32,8 +32,19 @@ if "!CL_PATH!"=="" (
 echo Found CL at: !CL_PATH!
 
 echo DEBUG: Running NVCC...
+set "CONFIG=%CONFIG: =%"
+if /I "%CONFIG%"=="Debug" (
+    echo [NVCC] Debug build detected.
+    set "NVCC_FLAGS=-g -G -D_DEBUG -O0 -Xcompiler /MTd"
+) else (
+    echo [NVCC] Release build detected.
+    set "NVCC_FLAGS=-O3 -Xcompiler /MT"
+)
+
+
+
 rem Removed -I"..\thirdparty\optix\include" and changed -ptx to -c for object compilation
-"%CUDA_BIN_PATH%\nvcc.exe" -ccbin "!CL_PATH!" --use-local-env -m64 -D_WIN64 -D_WIN32 -c -O3 -arch=sm_75 -Wno-deprecated-gpu-targets -allow-unsupported-compiler --use_fast_math %*
+"%CUDA_BIN_PATH%\nvcc.exe" -ccbin "!CL_PATH!" --use-local-env -m64 -D_WIN64 -D_WIN32 -v -c !NVCC_FLAGS! -arch=sm_75 -Wno-deprecated-gpu-targets -allow-unsupported-compiler --use_fast_math %*
 
 if %ERRORLEVEL% neq 0 (
     echo Error: NVCC failed with error level %ERRORLEVEL%
