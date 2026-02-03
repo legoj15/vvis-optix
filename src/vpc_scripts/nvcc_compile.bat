@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
-rem Ensure basic system commands are in PATH
-set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;!PATH!"
+rem Ensure basic system commands and PowerShell are in PATH
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0;%ProgramFiles%\PowerShell\7;%ProgramFiles%\PowerShell\6;%LOCALAPPDATA%\Microsoft\WindowsApps;!PATH!"
 
 if "%CUDA_PATH%"=="" (
     if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1" (

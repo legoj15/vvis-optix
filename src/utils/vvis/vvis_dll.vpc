@@ -109,6 +109,5 @@ $Project "VVIS"
 		$Lib tier2
 		$Lib vmpi [$WIN32]
 		$Lib "$LIBCOMMON/lzma"
-		$File "$SRCDIR\thirdparty\libcurl\lib\win32\libcurl.lib" [$WIN32]
 	}
 }
