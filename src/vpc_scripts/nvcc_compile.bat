@@ -1,6 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
+rem Ensure basic system commands are in PATH
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;!PATH!"
+
 if "%CUDA_PATH%"=="" (
     if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1" (
         set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
@@ -13,17 +16,18 @@ if "%CUDA_PATH%"=="" (
 
 set "CUDA_BIN_PATH=%CUDA_PATH%\bin"
 
-rem Use vswhere to find the latest Visual Studio installation (VS 2022 to VS 2026)
-set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+rem Use vswhere to find the latest Visual Studio installation
+set "VSWHERE_DIR=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
+set "VS_INSTALL_DIR="
 
-if not exist "%VSWHERE_PATH%" (
-    echo Error: vswhere.exe not found at %VSWHERE_PATH%
-    exit /b 1
+if exist "%VSWHERE_DIR%\vswhere.exe" (
+    pushd "%VSWHERE_DIR%"
+    for /f "usebackq tokens=*" %%i in (`vswhere.exe -latest -version "[17.0,30.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+        set "VS_INSTALL_DIR=%%i"
+    )
+    popd
 )
 
-for /f "usebackq tokens=*" %%i in (`"%VSWHERE_PATH%" -latest -version "[17.0,30.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
-    set "VS_INSTALL_DIR=%%i"
-)
 
 if "%VS_INSTALL_DIR%"=="" (
     echo Error: Visual Studio 2022/2026 with VC++ Tools not found.
@@ -42,11 +46,8 @@ if not exist "%VCVARS_PATH%" (
 call "%VCVARS_PATH%"
 
 rem Use cl.exe from path (set by vcvars)
-set "CL_PATH=cl.exe"
-
-if not exist "!CL_PATH!" (
-    for %%X in (cl.exe) do (set CL_PATH=%%~$PATH:X)
-)
+set "CL_PATH="
+for %%X in (cl.exe) do (set "CL_PATH=%%~$PATH:X")
 
 if "!CL_PATH!"=="" (
     echo Error: cl.exe not found in PATH after vcvars64.bat
@@ -56,8 +57,16 @@ if "!CL_PATH!"=="" (
 echo Found CL at: !CL_PATH!
 
 echo DEBUG: Running NVCC...
-set "CONFIG=%CONFIG: =%"
-if /I "%CONFIG%"=="Debug" (
+set "CONFIG_CLEAN=%CONFIG: =%"
+if /I "!CONFIG_CLEAN!"=="Debug" (
+    set "IS_DEBUG=1"
+) else if /I "!CONFIG_CLEAN!"=="Debugx64" (
+    set "IS_DEBUG=1"
+) else (
+    set "IS_DEBUG=0"
+)
+
+if "!IS_DEBUG!"=="1" (
     echo [NVCC] Debug build detected.
     set "NVCC_FLAGS=-g -G -D_DEBUG -O0 -Xcompiler /MTd"
 ) else (
@@ -65,9 +74,8 @@ if /I "%CONFIG%"=="Debug" (
     set "NVCC_FLAGS=-O3 -Xcompiler /MT"
 )
 
-
-
 rem Removed -I"..\thirdparty\optix\include" and changed -ptx to -c for object compilation
+rem Quote all flags and capture all arguments robustly
 "%CUDA_BIN_PATH%\nvcc.exe" -ccbin "!CL_PATH!" --use-local-env -m64 -D_WIN64 -D_WIN32 -v -c !NVCC_FLAGS! -arch=sm_75 -Wno-deprecated-gpu-targets -allow-unsupported-compiler --use_fast_math %*
 
 if %ERRORLEVEL% neq 0 (
@@ -76,3 +84,4 @@ if %ERRORLEVEL% neq 0 (
 )
 
 endlocal
+
