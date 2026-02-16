@@ -284,11 +284,10 @@ void CalcPortalVis(void) {
   } else
 #endif
   {
-    if (g_bExecuteCuda) {
-      RunPortalFlowCUDA();
-    } else {
-      RunThreadsOnIndividual(g_numportals * 2, true, PortalFlow);
-    }
+    // Hybrid mode: GPU does BasePortalVis, CPU does PortalFlow.
+    // PortalFlow uses ClipToSeperators which is GPU-hostile but runs
+    // efficiently on CPU with 32 threads.
+    RunThreadsOnIndividual(g_numportals * 2, true, PortalFlow);
   }
 }
 

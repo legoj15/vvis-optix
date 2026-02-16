@@ -22,8 +22,8 @@
 // Data Structures (Device & Host)
 // ----------------------------------------------------------------------------------
 
-#define MAX_POINTS_ON_WINDING_GPU 64
-#define MAX_DEPTH_GPU 64
+#define MAX_POINTS_ON_WINDING_GPU 16
+#define MAX_DEPTH_GPU 10
 
 struct CUDAPortal {
   Vector origin;
@@ -45,11 +45,6 @@ struct CUDAWinding {
   Vector points[MAX_POINTS_ON_WINDING_GPU];
 };
 
-struct CUDASeparator {
-  Vector normal;
-  float dist;
-};
-
 // ----------------------------------------------------------------------------------
 // Global Device Pointers
 // ----------------------------------------------------------------------------------
@@ -67,6 +62,13 @@ static int *g_dLeafPortals = nullptr;
 
 static unsigned char *g_dPortalFlood = nullptr;
 static unsigned char *g_dPortalVis = nullptr;
+
+// Debug counters (device-side)
+__device__ int g_dbgSphereSkipPass = 0; // pass portal behind source
+__device__ int g_dbgSphereSkipSrc = 0;  // source behind backplane
+__device__ int g_dbgClipSepZeroed = 0;  // ClipToSeperators clipped target to 0
+__device__ int g_dbgDepthGt0 = 0;       // times depth > 0 branch taken
+__device__ int g_dbgPortalsMarked = 0;  // portals marked visible
 
 static int *g_dStack_leafIdx = nullptr;
 static int *g_dStack_lastPortalIdx = nullptr;
@@ -123,56 +125,134 @@ __device__ inline void VectorNormalizeGPU(Vector &v) {
     VectorScaleGPU(v, 1.0f / len);
 }
 
-__device__ bool BuildSeparatorGPU(const CUDAWinding *w1, const CUDAWinding *w2,
-                                  const Vector &portalNormal,
-                                  CUDASeparator *sep) {
-  for (int i = 0; i < w1->numpoints; i++) {
-    int i2 = (i + 1) % w1->numpoints;
-    Vector v1, v2;
-    VectorSubtractGPU(w1->points[i2], w1->points[i], v1);
-    for (int j = 0; j < w2->numpoints; j++) {
-      VectorSubtractGPU(w2->points[j], w1->points[i], v2);
-      Vector normal;
-      CrossProductGPU(v2, v1, normal);
-      if (DotProductGPU(normal, normal) < 1e-4f)
-        continue;
-      VectorNormalizeGPU(normal);
-      float dist = DotProductGPU(w1->points[i], normal);
+__device__ inline void VectorAddScaledGPU(const Vector &a, const Vector &dir,
+                                          float t, Vector &out) {
+  out.x = a.x + dir.x * t;
+  out.y = a.y + dir.y * t;
+  out.z = a.z + dir.z * t;
+}
 
-      bool side1 = true;
-      for (int k = 0; k < w1->numpoints; k++) {
-        if (DotProductGPU(w1->points[k], normal) - dist < -VIS_EPSILON) {
-          side1 = false;
-          break;
-        }
-      }
-      if (!side1) {
-        VectorNegateGPU(normal);
-        dist = -dist;
-        side1 = true;
-        for (int k = 0; k < w1->numpoints; k++) {
-          if (DotProductGPU(w1->points[k], normal) - dist < -VIS_EPSILON) {
-            side1 = false;
-            break;
-          }
-        }
-      }
-      if (!side1)
-        continue;
+// Forward declarations
+__device__ inline void CopyWindingGPU(const CUDAWinding *src, CUDAWinding *dst);
+__device__ void ChopWindingGPU(const CUDAWinding *in, CUDAWinding *out,
+                               const Vector &normal, float dist);
+// ----------------------------------------------------------------------------------
+// GPU-Friendly Visibility Test: Ray Probe Approach
+//
+// The CPU's ClipToSeperators finds separator planes between source/pass edges
+// and clips the target winding — an O(S×P×(S+P)) algorithm with deeply nested
+// divergent loops that is fundamentally GPU-hostile.
+//
+// Instead, we use a ray probe: cast probe rays from source vertices/centroid
+// toward target vertices/centroid and check if any ray passes through the
+// prevPass portal polygon. This is O(NUM_PROBE_RAYS × numPassPts) with
+// no deeply nested divergent control flow.
+//
+// The winding narrowing that ClipToSeperators normally provides (preventing
+// recursion explosion) is done at the call site with simple plane-chops
+// (clip nextPass by source plane and by prevPass plane — O(1) per depth).
+// ----------------------------------------------------------------------------------
 
-      bool side2 = true;
-      for (int k = 0; k < w2->numpoints; k++) {
-        if (DotProductGPU(w2->points[k], normal) - dist > VIS_EPSILON) {
-          side2 = false;
-          break;
-        }
-      }
-      if (side2) {
-        VectorCopyGPU(normal, sep->normal);
-        sep->dist = dist;
-        return true;
-      }
+#define NUM_PROBE_RAYS 32
+
+// Test if a ray segment (origin -> target) intersects a convex polygon.
+__device__ bool
+RayHitsConvexPolygonGPU(const Vector &rayOrigin, const Vector &rayTarget,
+                        const Vector *polyPoints, int numPolyPoints,
+                        const Vector &polyNormal, float polyDist) {
+  Vector dir;
+  VectorSubtractGPU(rayTarget, rayOrigin, dir);
+
+  float denom = DotProductGPU(dir, polyNormal);
+  if (fabsf(denom) < 1e-6f)
+    return false;
+
+  float t = (polyDist - DotProductGPU(rayOrigin, polyNormal)) / denom;
+  if (t < -0.01f || t > 1.01f)
+    return false;
+
+  Vector hitPt;
+  VectorAddScaledGPU(rayOrigin, dir, t, hitPt);
+
+  for (int i = 0; i < numPolyPoints; i++) {
+    int j = (i + 1) % numPolyPoints;
+    Vector edge, toHit, cross;
+    VectorSubtractGPU(polyPoints[j], polyPoints[i], edge);
+    VectorSubtractGPU(hitPt, polyPoints[i], toHit);
+    CrossProductGPU(edge, toHit, cross);
+    if (DotProductGPU(cross, polyNormal) < -VIS_EPSILON)
+      return false;
+  }
+  return true;
+}
+
+// Test visibility: can any probe ray from source reach target while passing
+// through the prevPass portal?
+// Returns true if at least one ray confirms visibility.
+__device__ bool
+RayProbeVisibilityGPU(const CUDAWinding *source, const Vector *prevPassPts,
+                      int numPrevPassPts, const Vector &prevPassNormal,
+                      float prevPassDist, const CUDAWinding *target) {
+  int numSrc = source->numpoints;
+  int numTgt = target->numpoints;
+  if (numSrc <= 0 || numTgt <= 0 || numPrevPassPts <= 0)
+    return false;
+
+  // Compute centroids
+  Vector srcCentroid;
+  srcCentroid.x = srcCentroid.y = srcCentroid.z = 0.0f;
+  for (int i = 0; i < numSrc; i++) {
+    srcCentroid.x += source->points[i].x;
+    srcCentroid.y += source->points[i].y;
+    srcCentroid.z += source->points[i].z;
+  }
+  float invSrc = 1.0f / (float)numSrc;
+  srcCentroid.x *= invSrc;
+  srcCentroid.y *= invSrc;
+  srcCentroid.z *= invSrc;
+
+  Vector tgtCentroid;
+  tgtCentroid.x = tgtCentroid.y = tgtCentroid.z = 0.0f;
+  for (int i = 0; i < numTgt; i++) {
+    tgtCentroid.x += target->points[i].x;
+    tgtCentroid.y += target->points[i].y;
+    tgtCentroid.z += target->points[i].z;
+  }
+  float invTgt = 1.0f / (float)numTgt;
+  tgtCentroid.x *= invTgt;
+  tgtCentroid.y *= invTgt;
+  tgtCentroid.z *= invTgt;
+
+  // Ray 0: centroid-to-centroid (most likely to pass through)
+  if (RayHitsConvexPolygonGPU(srcCentroid, tgtCentroid, prevPassPts,
+                              numPrevPassPts, prevPassNormal, prevPassDist))
+    return true;
+
+  // Rays 1..NUM_PROBE_RAYS-1: vertex-to-vertex and vertex-to-centroid
+  for (int r = 1; r < NUM_PROBE_RAYS; r++) {
+    Vector srcPt, tgtPt;
+
+    if (r <= numSrc) {
+      // Source vertex to target centroid
+      int si = (r - 1) % numSrc;
+      VectorCopyGPU(source->points[si], srcPt);
+      VectorCopyGPU(tgtCentroid, tgtPt);
+    } else if (r <= numSrc + numTgt) {
+      // Source centroid to target vertex
+      int ti = (r - numSrc - 1) % numTgt;
+      VectorCopyGPU(srcCentroid, srcPt);
+      VectorCopyGPU(target->points[ti], tgtPt);
+    } else {
+      // Vertex-to-vertex with offset
+      int si = (r - 1) % numSrc;
+      int ti = (r / numSrc) % numTgt;
+      VectorCopyGPU(source->points[si], srcPt);
+      VectorCopyGPU(target->points[ti], tgtPt);
     }
+
+    if (RayHitsConvexPolygonGPU(srcPt, tgtPt, prevPassPts, numPrevPassPts,
+                                prevPassNormal, prevPassDist))
+      return true;
   }
   return false;
 }
@@ -403,71 +483,113 @@ __global__ void PortalFlowKernel(
         continue;
       }
 
-      // ... Geometric Checks ...
+      // --- Geometric Checks (faithful port of CPU RecursiveLeafFlow) ---
 
       const CUDAPortal *pP = &portals[pIdx];
-      Vector clipNormal;
-      VectorCopyGPU(pP->planeNormal, clipNormal);
-      VectorNegateGPU(clipNormal);
-      float clipDist = -pP->planeDist;
 
-      CUDAWinding curSource;
-      curSource.numpoints = s_sourceNumPoints[curAddr];
-      for (int k = 0; k < curSource.numpoints; k++)
-        VectorCopyGPU(s_sourcePoints[curAddr * MAX_POINTS_ON_WINDING_GPU + k],
-                      curSource.points[k]);
-
-      CUDAWinding nextSource;
-      ChopWindingGPU(&curSource, &nextSource, clipNormal, clipDist);
-      if (nextSource.numpoints == 0)
-        continue;
+      // Sphere test: pass portal vs source portal plane
+      // (CPU: DotProduct(p->origin, thread->pstack_head.portalplane.normal))
+      float dPass =
+          DotProductGPU(pP->origin, pSrc->planeNormal) - pSrc->planeDist;
+      if (dPass < -pP->radius) {
+        atomicAdd(&g_dbgSphereSkipPass, 1);
+        continue; // entirely behind source — skip
+      }
 
       CUDAWinding nextPass;
-      nextPass.numpoints = pP->numPoints;
-      if (nextPass.numpoints > MAX_POINTS_ON_WINDING_GPU)
-        nextPass.numpoints = MAX_POINTS_ON_WINDING_GPU;
-      for (int k = 0; k < nextPass.numpoints; k++)
-        VectorCopyGPU(windingPoints[pP->windingOffset + k], nextPass.points[k]);
+      if (dPass > pP->radius) {
+        // Entirely in front — use full winding, no chop needed
+        nextPass.numpoints = pP->numPoints;
+        if (nextPass.numpoints > MAX_POINTS_ON_WINDING_GPU)
+          nextPass.numpoints = MAX_POINTS_ON_WINDING_GPU;
+        for (int k = 0; k < nextPass.numpoints; k++)
+          VectorCopyGPU(windingPoints[pP->windingOffset + k],
+                        nextPass.points[k]);
+      } else {
+        // Straddles — chop pass winding by source portal plane
+        CUDAWinding fullPass;
+        fullPass.numpoints = pP->numPoints;
+        if (fullPass.numpoints > MAX_POINTS_ON_WINDING_GPU)
+          fullPass.numpoints = MAX_POINTS_ON_WINDING_GPU;
+        for (int k = 0; k < fullPass.numpoints; k++)
+          VectorCopyGPU(windingPoints[pP->windingOffset + k],
+                        fullPass.points[k]);
+        ChopWindingGPU(&fullPass, &nextPass, pSrc->planeNormal,
+                       pSrc->planeDist);
+        if (nextPass.numpoints == 0)
+          continue;
+      }
 
-      Vector rootNormal;
-      VectorCopyGPU(pSrc->planeNormal, rootNormal);
-      float rootDist = pSrc->planeDist;
-      CUDAWinding tempPass;
-      ChopWindingGPU(&nextPass, &tempPass, rootNormal, rootDist);
-      CopyWindingGPU(&tempPass, &nextPass);
-      if (nextPass.numpoints == 0)
-        continue;
+      // Sphere test: source portal vs pass portal backplane
+      // (CPU: DotProduct(thread->base->origin, p->plane.normal))
+      float dSrc = DotProductGPU(pSrc->origin, pP->planeNormal) - pP->planeDist;
+      if (dSrc > pSrc->radius) {
+        atomicAdd(&g_dbgSphereSkipSrc, 1);
+        continue; // entirely behind backplane — skip
+      }
 
+      CUDAWinding nextSource;
+      if (dSrc < -pSrc->radius) {
+        // Entirely in front of backplane — use current source, no chop
+        nextSource.numpoints = s_sourceNumPoints[curAddr];
+        if (nextSource.numpoints > MAX_POINTS_ON_WINDING_GPU)
+          nextSource.numpoints = MAX_POINTS_ON_WINDING_GPU;
+        for (int k = 0; k < nextSource.numpoints; k++)
+          VectorCopyGPU(s_sourcePoints[curAddr * MAX_POINTS_ON_WINDING_GPU + k],
+                        nextSource.points[k]);
+      } else {
+        // Straddles — chop source by backplane
+        CUDAWinding curSource;
+        curSource.numpoints = s_sourceNumPoints[curAddr];
+        if (curSource.numpoints > MAX_POINTS_ON_WINDING_GPU)
+          curSource.numpoints = MAX_POINTS_ON_WINDING_GPU;
+        for (int k = 0; k < curSource.numpoints; k++)
+          VectorCopyGPU(s_sourcePoints[curAddr * MAX_POINTS_ON_WINDING_GPU + k],
+                        curSource.points[k]);
+        Vector backNormal;
+        VectorCopyGPU(pP->planeNormal, backNormal);
+        VectorNegateGPU(backNormal);
+        ChopWindingGPU(&curSource, &nextSource, backNormal, -pP->planeDist);
+        if (nextSource.numpoints == 0)
+          continue;
+      }
+
+      // Depth-0 fast path: at depth 0 there is no previous pass winding,
+      // so the second leaf can only be blocked if coplanar.
+      // Skip visibility test and go straight to mark + recurse.
       if (depth > 0) {
-        CUDAWinding rootW;
-        int rootAddr0 = STACK_ADDR_ARG(0, numHostPortals);
-        rootW.numpoints = s_sourceNumPoints[rootAddr0];
-        if (rootW.numpoints > MAX_POINTS_ON_WINDING_GPU)
-          rootW.numpoints = MAX_POINTS_ON_WINDING_GPU;
-        for (int k = 0; k < rootW.numpoints; k++)
-          VectorCopyGPU(
-              s_sourcePoints[rootAddr0 * MAX_POINTS_ON_WINDING_GPU + k],
-              rootW.points[k]);
+        atomicAdd(&g_dbgDepthGt0, 1);
 
-        CUDAWinding prevPass;
+        // Get prevPass info from the stack
         int passAddr = STACK_ADDR_ARG(depth, numHostPortals);
-        prevPass.numpoints = s_passNumPoints[passAddr];
-        if (prevPass.numpoints > MAX_POINTS_ON_WINDING_GPU)
-          prevPass.numpoints = MAX_POINTS_ON_WINDING_GPU;
-        for (int v = 0; v < prevPass.numpoints; v++)
-          VectorCopyGPU(s_passPoints[passAddr * MAX_POINTS_ON_WINDING_GPU + v],
-                        prevPass.points[v]);
 
-        CUDASeparator sep;
-        if (BuildSeparatorGPU(&rootW, &prevPass, rootNormal, &sep)) {
-          CUDAWinding tempSource;
-          ChopWindingGPU(&nextSource, &tempSource, sep.normal, sep.dist);
-          CopyWindingGPU(&tempSource, &nextSource);
-          if (nextSource.numpoints == 0)
-            continue;
+        const Vector *prevPassPts =
+            &s_passPoints[passAddr * MAX_POINTS_ON_WINDING_GPU];
+        int numPrevPassPts = s_passNumPoints[passAddr];
+        if (numPrevPassPts > MAX_POINTS_ON_WINDING_GPU)
+          numPrevPassPts = MAX_POINTS_ON_WINDING_GPU;
+
+        // Get prevPass portal plane
+        int prevPortalIdx = s_lastPortalIdx[curAddr];
+        Vector prevPassNormal;
+        float prevPassDist;
+        if (prevPortalIdx >= 0 && prevPortalIdx < numHostPortals) {
+          VectorCopyGPU(portals[prevPortalIdx].planeNormal, prevPassNormal);
+          prevPassDist = portals[prevPortalIdx].planeDist;
+        } else {
+          continue;
+        }
+
+        // Ray probe: test if any ray from source to target passes through
+        // the prevPass portal (fast, GPU-friendly — no nested loops)
+        if (!RayProbeVisibilityGPU(&nextSource, prevPassPts, numPrevPassPts,
+                                   prevPassNormal, prevPassDist, &nextPass)) {
+          atomicAdd(&g_dbgClipSepZeroed, 1);
+          continue;
         }
       }
 
+      atomicAdd(&g_dbgPortalsMarked, 1);
       portalVisRow[pIdx >> 3] |= (1 << (pIdx & 7));
 
       if (depth < MAX_DEPTH_GPU - 1) {
@@ -543,11 +665,22 @@ void RunBasePortalVisCUDA() {
 
   int totalBaseVis = 0;
   for (int i = 0; i < numPortals; i++) {
+    // Allocate portalfront, portalflood, portalvis (same as CPU BasePortalVis)
     if (!portals[i].portalfront) {
       portals[i].portalfront = (byte *)malloc(portalbytes);
       memset(portals[i].portalfront, 0, portalbytes);
     }
     memcpy(portals[i].portalfront, &hVis[i * portalbytes], portalbytes);
+
+    if (!portals[i].portalflood) {
+      portals[i].portalflood = (byte *)malloc(portalbytes);
+    }
+    memset(portals[i].portalflood, 0, portalbytes);
+
+    if (!portals[i].portalvis) {
+      portals[i].portalvis = (byte *)malloc(portalbytes);
+    }
+    memset(portals[i].portalvis, 0, portalbytes);
 
     // Count bits for debug
     for (int j = 0; j < portalbytes; j++) {
@@ -560,6 +693,13 @@ void RunBasePortalVisCUDA() {
     }
   }
   Msg("CUDA BasePortalVis Total Bits Set: %d\n", totalBaseVis);
+
+  // Run SimpleFlood on CPU for each portal to populate portalflood
+  // (required for CPU PortalFlow to function correctly)
+  for (int i = 0; i < numPortals; i++) {
+    SimpleFlood(&portals[i], portals[i].leaf);
+    portals[i].nummightsee = CountBits(portals[i].portalflood, numPortals);
+  }
 
   cudaFree(g_dPortals);
   cudaFree(g_dWindingPoints);
@@ -585,6 +725,7 @@ void RunPortalFlowCUDA() {
   std::vector<Vector> hWindingPoints;
   for (int i = 0; i < numPortals; i++) {
     hPortals[i].origin = portals[i].origin;
+    hPortals[i].radius = portals[i].radius;
     hPortals[i].planeNormal = portals[i].plane.normal;
     hPortals[i].planeDist = portals[i].plane.dist;
     hPortals[i].numPoints = portals[i].winding->numpoints;
@@ -624,16 +765,12 @@ void RunPortalFlowCUDA() {
   CHECK_CUDA(cudaMemcpy(g_dPortalFlood, hFlood.data(), numPortals * portalbytes,
                         cudaMemcpyHostToDevice));
 
-  // Seed PortalVis from portalfront (BasePortalVis results)
-  std::vector<unsigned char> hBaseVis(numPortals * portalbytes);
-  for (int i = 0; i < numPortals; i++) {
-    if (portals[i].portalfront) {
-      memcpy(&hBaseVis[i * portalbytes], portals[i].portalfront, portalbytes);
-    }
-  }
+  // Start PortalVis from zero (matching CPU: portalvis starts empty,
+  // gets populated by PortalFlow recursion).
+  // DO NOT seed from portalfront — that would make the pruning check
+  // think everything is already processed.
   CHECK_CUDA(cudaMalloc(&g_dPortalVis, numPortals * portalbytes));
-  CHECK_CUDA(cudaMemcpy(g_dPortalVis, hBaseVis.data(), numPortals * portalbytes,
-                        cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemset(g_dPortalVis, 0, numPortals * portalbytes));
 
   size_t numEntries = (size_t)numPortals * MAX_DEPTH_GPU;
   CHECK_CUDA(cudaMalloc(&g_dStack_leafIdx, numEntries * sizeof(int)));
@@ -674,6 +811,20 @@ void RunPortalFlowCUDA() {
   err = cudaDeviceSynchronize();
   if (err != cudaSuccess)
     Error("Kernel Sync Error: %s\n", cudaGetErrorString(err));
+
+  // Print debug counters
+  {
+    int sphereSkipPass = 0, sphereSkipSrc = 0, clipSepZeroed = 0, depthGt0 = 0,
+        portalsMarked = 0;
+    cudaMemcpyFromSymbol(&sphereSkipPass, g_dbgSphereSkipPass, sizeof(int));
+    cudaMemcpyFromSymbol(&sphereSkipSrc, g_dbgSphereSkipSrc, sizeof(int));
+    cudaMemcpyFromSymbol(&clipSepZeroed, g_dbgClipSepZeroed, sizeof(int));
+    cudaMemcpyFromSymbol(&depthGt0, g_dbgDepthGt0, sizeof(int));
+    cudaMemcpyFromSymbol(&portalsMarked, g_dbgPortalsMarked, sizeof(int));
+    Msg("[DEBUG] SphereSkipPass=%d SphereSkipSrc=%d ClipSepZeroed=%d "
+        "DepthGt0=%d PortalsMarked=%d\n",
+        sphereSkipPass, sphereSkipSrc, clipSepZeroed, depthGt0, portalsMarked);
+  }
 
   std::vector<unsigned char> hOutVis(numPortals * portalbytes);
   cudaMemcpy(hOutVis.data(), g_dPortalVis, numPortals * portalbytes,

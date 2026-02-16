@@ -44,14 +44,13 @@ $Configuration
 	
 	$PreBuildEvent
 	{
-		// Use Sysnative to bypass File System Redirection for 32-bit build processes
-		$CommandLine		"if EXIST $OUTLIBDIR\$(TargetName).lib ( for /f $QUOTEdelims=$QUOTE %%A in ('%SystemRoot%\Sysnative\attrib.exe $QUOTE$OUTLIBDIR\$(TargetName).lib$QUOTE') do set valveTmpIsReadOnly=$QUOTE%%A$QUOTE" "\n" \
+		$CommandLine		"if EXIST $OUTLIBDIR\$(TargetName).lib ( for /f $QUOTEdelims=$QUOTE %%A in ('attrib $QUOTE$OUTLIBDIR\$(TargetName).lib$QUOTE') do set valveTmpIsReadOnly=$QUOTE%%A$QUOTE" "\n" \
 							") else ( mkdir $OUTLIBDIR )" "\n" \
 							"set valveTmpIsReadOnlyLetter=%valveTmpIsReadOnly:~6,1%" "\n" \
 							"if $QUOTE%valveTmpIsReadOnlyLetter%$QUOTE==$QUOTER$QUOTE (" "\n" \
-							"    %SystemRoot%\Sysnative\attrib.exe -r $OUTLIBDIR\$(TargetName).lib" "\n" \
+							"    attrib -r $OUTLIBDIR\$(TargetName).lib" "\n" \
 							"    $SRCDIR\devtools\bin\gnu\touch.exe -d $QUOTE1999-01-01$QUOTE $OUTLIBDIR\$(TargetName).lib" "\n" \
-							"    %SystemRoot%\Sysnative\attrib.exe +r $OUTLIBDIR\$(TargetName).lib" "\n" \
+							"    attrib +r $OUTLIBDIR\$(TargetName).lib" "\n" \
 							")" "\n" \
 							"$HOST_VPC_EXE -crc2 $QUOTE$VPC_OUTPUT_FILE$QUOTE" "\n" 			
 	}

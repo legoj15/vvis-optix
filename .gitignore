@@ -507,3 +507,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/.agent
+*.prt
+*.bsp

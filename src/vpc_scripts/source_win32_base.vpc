@@ -3,7 +3,8 @@
 // builds the analyze.vpc file will not be listed as a dependency.
 $Include "$SRCDIR\vpc_scripts\source_win32_analyze.vpc" [$ANALYZE]
 
-$Conditional	$AT_LEAST_VS2022	"true" [$VS2022]
+$Conditional	$AT_LEAST_VS2026	"true" [$VS2026]
+$Conditional	$AT_LEAST_VS2022	"true" [$VS2022 || $AT_LEAST_VS2026]
 $Conditional	$AT_LEAST_VS2019	"true" [$VS2019 || $AT_LEAST_VS2022]
 $Conditional	$AT_LEAST_VS2017	"true" [$VS2017 || $AT_LEAST_VS2019]
 $Conditional	$AT_LEAST_VS2015	"true" [$VS2015 || $AT_LEAST_VS2017]
@@ -25,7 +26,8 @@ $Configuration
 		$PlatformToolset "v140" [$VS2015 && $ANALYZE] // VS 2015 for /analyze
 		$PlatformToolset "v141"		[$VS2017]
 		$PlatformToolset "v142"		[$VS2019]
-		$PlatformToolset "v143"		[$VS2022]
+		$PlatformToolset "v143"		[$VS2022 && !$VS2026]
+		$PlatformToolset "v145"		[$VS2026]
 
 		$WindowsTargetPlatformVersion "10.0"
 
@@ -35,7 +37,9 @@ $Configuration
 
 	$General
 	{
-		$ExecutableDirectories "$(ExecutablePath);C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\PowerShell\6;C:\Users\legoj\AppData\Local\Microsoft\WindowsApps;$(Path)"
+		$ExecutableDirectories "$(ExecutablePath)"
+		// We need to override mt.exe for Win7 compatibiity.  Append paths before $(ExecutablePath) if you need VS to use your tools rather than its own
+		$ExecutableDirectories "$BASE"
 		// VS 2012 compiles fine but does not link. We want to redirect to stub versions of
 		// the tools (like link.exe and mt.exe) so that the link stage will be NOPed when
 		// doing /analyze builds.
