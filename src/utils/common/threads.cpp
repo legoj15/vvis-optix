@@ -49,18 +49,15 @@ GetThreadWork
 int GetThreadWork(void) {
   int r;
 
-  ThreadLock();
-
-  if (dispatch == workcount) {
-    ThreadUnlock();
+  // Lock-free dispatch: use InterlockedIncrement to avoid CriticalSection
+  // contention when 32+ threads are rapidly consuming small work items.
+  r = InterlockedIncrement((volatile long *)&dispatch) - 1;
+  if (r >= workcount)
     return -1;
-  }
 
-  UpdatePacifier((float)dispatch / workcount);
-
-  r = dispatch;
-  dispatch++;
-  ThreadUnlock();
+  // Update pacifier occasionally (not every call to avoid console contention)
+  if (pacifier && (r & 63) == 0)
+    UpdatePacifier((float)r / workcount);
 
   return r;
 }
