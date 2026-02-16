@@ -147,6 +147,25 @@ void SortPortals(void) {
   if (nosort)
     return;
   qsort(sorted_portals, g_numportals * 2, sizeof(sorted_portals[0]), PComp);
+
+  // Interleave: dispatch hard portals early to reduce tail latency.
+  // After ascending sort, rearrange so we alternate hard/easy:
+  //   [easy0, easy1, ..., hardN-1, hardN]
+  //   becomes [hardN, easy0, hardN-1, easy1, ...]
+  // This ensures hard portals begin processing immediately on some threads
+  // while others work through easy portals concurrently.
+  {
+    int n = g_numportals * 2;
+    portal_t **temp = (portal_t **)malloc(n * sizeof(portal_t *));
+    int lo = 0, hi = n - 1, dst = 0;
+    while (lo <= hi) {
+      temp[dst++] = sorted_portals[hi--]; // hard
+      if (lo <= hi)
+        temp[dst++] = sorted_portals[lo++]; // easy
+    }
+    memcpy(sorted_portals, temp, n * sizeof(portal_t *));
+    free(temp);
+  }
 }
 
 /*
@@ -884,7 +903,8 @@ int ParseCommandLine(int argc, char **argv) {
       EnableFullMinidumps(true);
     } else if (!Q_stricmp(argv[i], CMDLINEOPTION_NOVCONFIG)) {
     } else if (!Q_stricmp(argv[i], "-vproject") ||
-               !Q_stricmp(argv[i], "-game")) {
+               !Q_stricmp(argv[i], "-game") ||
+               !Q_stricmp(argv[i], "-contentroot")) {
       ++i;
     } else if (!Q_stricmp(argv[i], "-allowdebug") ||
                !Q_stricmp(argv[i], "-steam")) {

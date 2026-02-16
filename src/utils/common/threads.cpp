@@ -55,8 +55,8 @@ int GetThreadWork(void) {
   if (r >= workcount)
     return -1;
 
-  // Update pacifier occasionally (not every call to avoid console contention)
-  if (pacifier && (r & 63) == 0)
+  // Update pacifier (thread-safe via InterlockedCompareExchange)
+  if (pacifier)
     UpdatePacifier((float)r / workcount);
 
   return r;
