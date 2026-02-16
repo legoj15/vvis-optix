@@ -510,3 +510,6 @@ FodyWeavers.xsd
 /.agent
 *.prt
 *.bsp
+*.vbsp_hash
+*.ref_hash
+*.ref_time

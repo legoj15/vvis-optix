@@ -490,32 +490,10 @@ void RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack) {
       test = (long *)p->portalflood;
     }
 
-    // SSE2-accelerated mightsee pruning: process 128 bits (2 longs) per
-    // iteration
-    {
-      long *prev_ms = (long *)prevstack->mightsee;
-      __m128i acc = _mm_setzero_si128();
-      int j_simd = 0;
-      for (; j_simd + 1 < portallongs; j_simd += 2) {
-        __m128i ms = _mm_loadu_si128((__m128i *)&prev_ms[j_simd]);
-        __m128i ts = _mm_loadu_si128((__m128i *)&test[j_simd]);
-        __m128i vs = _mm_loadu_si128((__m128i *)&vis[j_simd]);
-        __m128i m = _mm_and_si128(ms, ts);
-        _mm_storeu_si128((__m128i *)&might[j_simd], m);
-        acc = _mm_or_si128(acc, _mm_andnot_si128(vs, m));
-      }
-      // Scalar tail
-      more = 0;
-      for (; j_simd < portallongs; j_simd++) {
-        might[j_simd] = prev_ms[j_simd] & test[j_simd];
-        more |= (might[j_simd] & ~vis[j_simd]);
-      }
-      // Reduce the SSE accumulator
-      if (!more) {
-        __m128i hi = _mm_srli_si128(acc, 8);
-        __m128i combined = _mm_or_si128(acc, hi);
-        more = (long)_mm_cvtsi128_si64(combined);
-      }
+    more = 0;
+    for (j = 0; j < portallongs; j++) {
+      might[j] = ((long *)prevstack->mightsee)[j] & test[j];
+      more |= (might[j] & ~vis[j]);
     }
 
     if (!more &&

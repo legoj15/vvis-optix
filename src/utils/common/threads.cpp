@@ -20,7 +20,6 @@
 #include "pacifier.h"
 #include "threads.h"
 
-
 #define MAX_THREADS 64
 
 class CRunThreadsData {
@@ -117,7 +116,7 @@ void ThreadSetDefault(void) {
   {
     GetSystemInfo(&info);
     numthreads = info.dwNumberOfProcessors;
-    if (numthreads < 1 || numthreads > 32)
+    if (numthreads < 1 || numthreads > 64)
       numthreads = 1;
   }
 
