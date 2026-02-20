@@ -344,20 +344,20 @@ bool FileSystem_GetExecutableDir(char *exedir, int exeDirLen) {
     return true;
   }
 
-  // 2. If -contentroot is specified, derive executable dir from it.
-  const char *pContentRoot = CommandLine()->ParmValue("-contentroot");
-  if (pContentRoot) {
+  // 2. If -binroot is specified, derive executable dir from it.
+  const char *pBinRoot = CommandLine()->ParmValue("-binroot");
+  if (pBinRoot) {
     char rootDir[MAX_PATH];
-    Q_MakeAbsolutePath(rootDir, sizeof(rootDir), pContentRoot);
+    Q_MakeAbsolutePath(rootDir, sizeof(rootDir), pBinRoot);
     Q_StripTrailingSlash(rootDir);
     if (FileSystem_ProbeBinDir(rootDir, exedir, exeDirLen))
       return true;
-    // Contentroot specified but no bin dir found — fall through.
+    // Binroot specified but no bin dir found — fall through.
   }
 
   // 3. If -game is specified, derive executable dir from the game
   //    directory's parent. This allows running against games like
-  //    Garry's Mod without needing -contentroot.
+  //    Garry's Mod without needing -binroot.
   const char *pGameDir = GetVProjectCmdLineValue();
   if (pGameDir) {
     char rootDir[MAX_PATH];
@@ -374,13 +374,13 @@ bool FileSystem_GetExecutableDir(char *exedir, int exeDirLen) {
 }
 
 static bool FileSystem_GetBaseDir(char *baseDir, int baseDirLen) {
-  // If -contentroot was specified, use it directly as the base directory.
+  // If -binroot was specified, use it directly as the base directory.
   // This replaces SDK_EXEC_DIR and allows the tool to resolve content
   // (VPKs, materials, models) from a specific game installation
   // regardless of where the executable or -game directory are located.
-  const char *pContentRoot = CommandLine()->ParmValue("-contentroot");
-  if (pContentRoot) {
-    Q_MakeAbsolutePath(baseDir, baseDirLen, pContentRoot);
+  const char *pBinRoot = CommandLine()->ParmValue("-binroot");
+  if (pBinRoot) {
+    Q_MakeAbsolutePath(baseDir, baseDirLen, pBinRoot);
     Q_StripTrailingSlash(baseDir);
     return true;
   }
@@ -748,9 +748,9 @@ FSReturnCode_t FileSystem_LoadSearchPaths(CFSSearchPathsInit &initInfo) {
       // is mapped in with the Steam depots, so we can just use the path as-is.
       pLocation += strlen(BASESOURCEPATHS_TOKEN);
 
-      // Resolve relative to the -game directory's parent, not -contentroot.
+      // Resolve relative to the -game directory's parent, not -binroot.
       // This allows using another game's gameinfo.txt (e.g. Garry's Mod)
-      // with -contentroot pointing at the SDK for compatible binaries only.
+      // with -binroot pointing at the SDK for compatible binaries only.
       const char *pGameDir = GetVProjectCmdLineValue();
       if (pGameDir) {
         static char gameParentDir[MAX_PATH];
