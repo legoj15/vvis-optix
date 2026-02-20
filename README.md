@@ -29,6 +29,8 @@ vvis_optix.exe -cuda -game <path_to_mod_folder> <mapname>
 
 If the `-cuda` flag is omitted, it falls back to a parallelized CPU path.
 
+NOTE: If using with Garry's Mod, use the `-binroot` flag to point at the root of Source SDK 2013 Multiplayer, as Garry's Mod's binaries are incompatible.
+
 ## Architecture
 
 This project splits visibility processing into a modern hybrid model:
