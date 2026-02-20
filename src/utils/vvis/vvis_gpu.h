@@ -1,5 +1,5 @@
-#ifndef VVIS_CUDA_H
-#define VVIS_CUDA_H
+#ifndef VVIS_GPU_H
+#define VVIS_GPU_H
 
 #ifdef _WIN32
 #pragma once
@@ -8,4 +8,4 @@
 void RunBasePortalVisCUDA();
 void RunPortalFlowCUDA();
 
-#endif // VVIS_CUDA_H
+#endif // VVIS_GPU_H

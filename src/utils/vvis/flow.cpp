@@ -355,7 +355,7 @@ public:
   CThreadFastMutex m_mutex;
 } g_PortalTrace;
 
-void WindingCenter(winding_t *w, Vector &center) {
+void vvis_WindingCenter(winding_t *w, Vector &center) {
   int i;
   float scale;
 
@@ -391,7 +391,7 @@ void DumpPortalTrace(pstack_t *pStack) {
   g_PortalTrace.m_list.AddToTail(mid);
   for (; pStack != NULL; pStack = pStack->next) {
     winding_t *w = pStack->pass ? pStack->pass : pStack->portal->winding;
-    WindingCenter(w, mid);
+    vvis_WindingCenter(w, mid);
     g_PortalTrace.m_list.AddToTail(mid);
     for (int i = 0; i < w->numpoints; i++) {
       g_PortalTrace.m_list.AddToTail(w->points[i]);

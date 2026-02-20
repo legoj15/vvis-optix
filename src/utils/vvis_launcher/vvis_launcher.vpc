@@ -6,7 +6,7 @@
 
 $Macro SRCDIR		"..\.."
 $Macro OUTBINDIR	"$SRCDIR\..\game\bin"
-$Macro OUTBINNAME	"vvis_cuda"
+$Macro OUTBINNAME	"vvis_optix"
 
 $Include "$SRCDIR\vpc_scripts\source_exe_con_base.vpc"
 

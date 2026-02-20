@@ -21,7 +21,7 @@
 #include "vis.h"
 #include "vmpi.h"
 #include "vmpi_tools_shared.h"
-#include "vvis_cuda.h"
+#include "vvis_gpu.h"
 #include <windows.h>
 
 int g_numportals;
@@ -89,7 +89,7 @@ winding_t *NewWinding(int points) {
   return w;
 }
 
-void pw(winding_t *w) {
+void vvis_pw(winding_t *w) {
   int i;
   for (i = 0; i < w->numpoints; i++)
     Msg("(%5.1f, %5.1f, %5.1f)\n", w->points[i][0], w->points[i][1],
@@ -147,25 +147,6 @@ void SortPortals(void) {
   if (nosort)
     return;
   qsort(sorted_portals, g_numportals * 2, sizeof(sorted_portals[0]), PComp);
-
-  // Interleave: dispatch hard portals early to reduce tail latency.
-  // After ascending sort, rearrange so we alternate hard/easy:
-  //   [easy0, easy1, ..., hardN-1, hardN]
-  //   becomes [hardN, easy0, hardN-1, easy1, ...]
-  // This ensures hard portals begin processing immediately on some threads
-  // while others work through easy portals concurrently.
-  {
-    int n = g_numportals * 2;
-    portal_t **temp = (portal_t **)malloc(n * sizeof(portal_t *));
-    int lo = 0, hi = n - 1, dst = 0;
-    while (lo <= hi) {
-      temp[dst++] = sorted_portals[hi--]; // hard
-      if (lo <= hi)
-        temp[dst++] = sorted_portals[lo++]; // easy
-    }
-    memcpy(sorted_portals, temp, n * sizeof(portal_t *));
-    free(temp);
-  }
 }
 
 /*
@@ -303,10 +284,11 @@ void CalcPortalVis(void) {
   } else
 #endif
   {
-    // Hybrid mode: GPU does BasePortalVis, CPU does PortalFlow.
-    // PortalFlow uses ClipToSeperators which is GPU-hostile but runs
-    // efficiently on CPU with 32 threads.
-    RunThreadsOnIndividual(g_numportals * 2, true, PortalFlow);
+    if (g_bExecuteCuda) {
+      RunPortalFlowCUDA();
+    } else {
+      RunThreadsOnIndividual(g_numportals * 2, true, PortalFlow);
+    }
   }
 }
 

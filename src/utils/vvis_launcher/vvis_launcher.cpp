@@ -5,7 +5,6 @@
 #include <direct.h>
 #include <stdio.h>
 
-
 char *GetLastErrorString() {
   static char err[2048];
 
@@ -29,7 +28,7 @@ char *GetLastErrorString() {
 
 int main(int argc, char *argv[]) {
   CommandLine()->CreateCmdLine(argc, argv);
-  const char *pDLLName = "vvis_dll_cuda.dll";
+  const char *pDLLName = "vvis_dll_optix.dll";
 
   CSysModule *pModule = Sys_LoadModule(pDLLName);
   if (!pModule) {
