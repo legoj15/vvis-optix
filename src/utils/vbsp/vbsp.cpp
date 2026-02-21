@@ -1036,7 +1036,7 @@ int RunVBSP(int argc, char **argv) {
     } else if (!Q_stricmp(argv[i], "-vproject") ||
                !Q_stricmp(argv[i], "-game") ||
                !Q_stricmp(argv[i], "-insert_search_path") ||
-               !Q_stricmp(argv[i], "-contentroot")) {
+               !Q_stricmp(argv[i], "-binroot")) {
       ++i;
     } else if (!Q_stricmp(argv[i], "-keepstalezip")) {
       g_bKeepStaleZip = true;
@@ -1113,6 +1113,8 @@ int RunVBSP(int argc, char **argv) {
         "  -vproject <directory> : Override the VPROJECT environment "
         "variable.\n"
         "  -game <directory>     : Same as -vproject.\n"
+        "  -binroot <directory>  : Overrides the base binary path (to find the "
+        "\"bin\\x64\" folder).\n"
         "\n");
 
     if (verbose) {

@@ -3122,6 +3122,7 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
     } else if (!Q_stricmp(argv[i], CMDLINEOPTION_NOVCONFIG)) {
     } else if (!Q_stricmp(argv[i], "-vproject") ||
                !Q_stricmp(argv[i], "-game") ||
+               !Q_stricmp(argv[i], "-binroot") ||
                !Q_stricmp(argv[i], "-insert_search_path")) {
       ++i;
     } else if (!Q_stricmp(argv[i], "-FullMinidumps")) {
@@ -3292,6 +3293,8 @@ void PrintUsage(int argc, char **argv) {
       "\n"
       "  -vproject <directory> : Override the VPROJECT environment variable.\n"
       "  -game <directory>     : Same as -vproject.\n"
+      "  -binroot <directory>  : Overrides the base binary path (to find the "
+      "\"bin\\x64\" folder).\n"
       "\n"
       "Other options:\n"
       "  -novconfig      : Don't bring up graphical UI on vproject errors.\n"
