@@ -138,6 +138,7 @@ bld/
 !game/bin/x64/
 game/bin/x64/*
 !game/bin/x64/test_vvis*
+!game/bin/x64/vis_simulator*
 !game/bin/x64/bsp_unit_tests/
 [Oo]bj/
 [Ll]og/

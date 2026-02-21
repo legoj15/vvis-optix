@@ -341,6 +341,9 @@ bool FileSystem_GetExecutableDir(char *exedir, int exeDirLen) {
       Q_strncat(exedir, PLATFORM_BIN_DIR, exeDirLen, COPY_ALL_CHARACTERS);
       Q_FixSlashes(exedir);
     }
+#if defined(_WIN32)
+    SetDllDirectoryA(exedir);
+#endif
     return true;
   }
 
@@ -350,8 +353,12 @@ bool FileSystem_GetExecutableDir(char *exedir, int exeDirLen) {
     char rootDir[MAX_PATH];
     Q_MakeAbsolutePath(rootDir, sizeof(rootDir), pContentRoot);
     Q_StripTrailingSlash(rootDir);
-    if (FileSystem_ProbeBinDir(rootDir, exedir, exeDirLen))
+    if (FileSystem_ProbeBinDir(rootDir, exedir, exeDirLen)) {
+#if defined(_WIN32)
+      SetDllDirectoryA(exedir);
+#endif
       return true;
+    }
     // Contentroot specified but no bin dir found — fall through.
   }
 
@@ -364,13 +371,23 @@ bool FileSystem_GetExecutableDir(char *exedir, int exeDirLen) {
     Q_MakeAbsolutePath(rootDir, sizeof(rootDir), pGameDir);
     Q_StripTrailingSlash(rootDir);
     Q_StripFilename(rootDir); // e.g. GarrysMod\garrysmod -> GarrysMod
-    if (FileSystem_ProbeBinDir(rootDir, exedir, exeDirLen))
+    if (FileSystem_ProbeBinDir(rootDir, exedir, exeDirLen)) {
+#if defined(_WIN32)
+      SetDllDirectoryA(exedir);
+#endif
       return true;
+    }
     // -game specified but no bin dir found — fall through.
   }
 
   // 4. Fallback: use the actual executable's directory.
-  return FileSystem_GetRealExecutableDir(exedir, exeDirLen);
+  bool bSuccess = FileSystem_GetRealExecutableDir(exedir, exeDirLen);
+#if defined(_WIN32)
+  if (bSuccess) {
+    SetDllDirectoryA(exedir);
+  }
+#endif
+  return bSuccess;
 }
 
 static bool FileSystem_GetBaseDir(char *baseDir, int baseDirLen) {
