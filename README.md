@@ -1,52 +1,67 @@
-# VVIS OptiX
+# Source Extreme Mapping Tools
 
-A hardware-accelerated drop-in replacement for the Source Engine's `vvis.exe` (Visibility Processor).
+A suite of modernization efforts, Python build pipelines, and hardware-accelerated drop-in replacements for the Source Engine's mapping tools (VBSP, VVIS, and VRAD). Designed to bring modern compilation speeds, robust CI/CD automated validation, and new micro-optimization workflows to Source Engine level design.
 
-## Key Features
+## The Toolchain
 
-- **OptiX Hardware Acceleration:** Shifts the core PortalFlow raytracing workload to the RT Cores on modern NVIDIA GPUs.
-- **Optimized in-game rendering:** Greater precision from thousands of rays allows for the same perceptible visibility, while reducing rendered visleafs out of sight.
-- **Drop-in Compatibility:** Built as `vvis_optix.exe`, it works seamlessly with existing map compilation workflows.
-- **Hybrid Architecture:** Combines fast CPU Setup/BasePortalVis bounds checking with GPU hardware raytracing for maximum efficiency.
+### 1. Lightmap Optimizer (`lmoptimizer_gui.py` & `lmoptimizer.py`)
+A Python-based toolkit and graphical interface that automates the micro-optimization of map lighting and performance.
+- **Auto-Compile Mode:** An iterative build loop that automatically integrates VBSP, VVIS (`-fast` execution), and VRAD directly into the optimizer to rapidly test and shrink global lightmap scales.
+- **Vis-Debug Painter:** Automatically identifies geometry flags and masks never-visible and emissive (texlight) faces from optimization, highlighting them in-engine for easy iteration.
+- **Python Automation API:** The backbone used for all automated map compilation, unit tests, and validation test harnesses in this repository.
+
+### 2. VBSP LMO (`vbsp_lmo.exe`)
+A patched version of the base VBSP engine geometry compiler.
+- **Brush Carving Enhancements:** Correctly manages and propagates Map Overlays during brush carving operations.
+- **Detail Sprite Support:** Retains detail sprites and correct alpha-blending logic on WorldVertexTransition (WVT) faces after patches.
+- **Integration:** Hooks smoothly into the Lightmap Optimizer pipeline.
+
+### 3. VVIS CUDA/OptiX (`vvis_cuda.exe` / `vvis_optix.exe`)
+A hardware-accelerated Visibility Processor.
+- **GPU PortalFlow Raytracing:** Shifts the heavy inner-loop raycasting workload to RT Cores on modern NVIDIA GPUs utilizing CUDA and OptiX SDK 9.1.
+- **Hybrid Architecture:** Combines fast CPU Setup and bounds checking with GPU massive concurrency trace calls.
+- **Modernized CPU Path:** For non-CUDA users, the fallback CPU path features SIMD (SSE2/AVX2) inner loop optimizations, lock-free dispatch, and support for up to 64 threads.
+- **Bit-Exact Parity:** Tested and proven to generate bit-for-bit exact visibility matches with the original Source SDK SDK reference algorithms—only significantly faster.
+
+### 4. VRAD RTX (`vrad_rtx.exe`)
+Hardware-accelerated global illumination and radiosity bounce lighting.
+- **OptiX Raytracing:** Hardware-accelerated VisMatrix generation, radiosity bouncing, and shadow ray batching.
+- **Meta-Batching Architecture:** A highly parallelized data strategy that significantly outperforms legacy Source CPU lighting algorithms.
+- **Bit-Accurate:** Ensures SDK parity while providing blistering-fast build times.
+
+## Key Improvements Across All Tools
+
+- **Portable Filesystem Handling:** Legacy SDK tools often demanded execution from within a specific `bin` folder. All tools here utilize modernized `|all_source_engine_paths|` resolution logic, allowing you to run them from anywhere.
+- **Advanced Game Resolution:** Can cleanly run against remote content through the new `-binroot` flag (ideal for Garry's Mod compatibility, taking advantage of the SDK 2013 Multiplayer base).
+- **Modernized Limits & Cleanup:** Raised thread limits from the ancient 16 up to 64 maximum threads, stripped out obsolete VMPI (Valve Message Passing Interface) dependencies to prevent crashes, and fixed various threading pool deadlocks (such as pipe hangs in PowerShell environments).
+- **Validation Suite:** An ironclad set of PowerShell and Python scripts (`run_tests.ps1`, `vrad_test_harness.ps1`, `vvis_test_harness.ps1`) to ensure pixel and bit-perfect fidelity against all modifications.
 
 ## Build Requirements
 
-- Visual Studio 2026 (untested on 2022 and below)
-- NVIDIA CUDA SDK 13.1 (untested on older versions)
-- NVIDIA OptiX SDK 9.1.0 (untested on older versions)
+If compiling the tools from source:
+- Visual Studio 2026 (untested on older setups)
+- NVIDIA CUDA SDK 13.1 (or newer)
+- NVIDIA OptiX SDK 9.1.0 
+- Python 3.10+ (for using `lmoptimizer`, tools, and validation scripts)
 
 ## Usage
 
-Tested on an RTX 3090.
+Tested primarily heavily on an RTX 3090, but should work on comparable hardware.
 
-Replace your existing `vvis.exe` with `vvis_optix.exe` and `vvis_dll_optix.dll` in your tooling pipeline. The OptiX kernels are auto-compiled at runtime or can be pre-compiled via the included `.ptx` logic. Filesystem handling has been altered to allow for this build of vvis to be placed anywhere on your computer (doesn't have to be in a Source bin folder).
+1. Replace your existing `vvis.exe`, `vrad.exe`, and `vbsp.exe` with the compiled binaries and extension `.dll` / `.ptx` files inside your workflow.
+2. The core compilers run as drop-in replacements for standard builds.
+3. For Python tools, you can execute `lmoptimizer_gui.py` to start the GUI.
 
-To invoke the hardware-accelerated path, run it with the `-cuda` flag:
-
+To explicitly invoke GPU hardware paths inside compile scripts:
+```bat
+vvis_cuda.exe -cuda -game <path_to_mod_folder> <mapname>
+vrad_rtx.exe -game <path_to_mod_folder> <mapname>
 ```
-vvis_optix.exe -cuda -game <path_to_mod_folder> <mapname>
-```
 
-If the `-cuda` flag is omitted, it falls back to a parallelized CPU path.
+If the `-cuda` flag is omitted for VVIS, it defaults to the aggressively optimized parallel CPU path. 
 
-NOTE: If using with Garry's Mod, use the `-binroot` flag to point at the root of Source SDK 2013 Multiplayer, as Garry's Mod's binaries are incompatible.
-
-## Architecture
-
-This project splits visibility processing into a modern hybrid model:
-1. **CPU BasePortalVis / SimpleFlood:** Fast memory bounds checking and topological setup using optimized CPU paths.
-2. **GPU PortalFlow (OptiX):** The heavy inner-loop raycasting, ported to OptiX trace calls. It utilizes stochastic sampling across portal boundaries for massive concurrency.
-
-Detailed architectural breakdowns can be found in the associated development documentation and commit history.
-
-## Testing Suite
-
-See [`.\game\bin\x64`](https://github.com/legoj15/vvis-optix/tree/master/game/bin/x64) for the Python/PowerShell automation suite used to validate parity between the reference SDK and the new GPU implementation.
-
-### Validation Example (`run_tests.ps1`)
-
-This script runs both the standard `vvis` and the new `vvis_optix` on a test map and validates the results. Be sure to have copied the vvis_optix executable and it's application extension to the bin\x64 folder of the 2013 MP SDK Base.
+**Garry's Mod Note:** Because GMod binaries are unique, please specify `-binroot <Path_To_Source_SDK_2013_Multiplayer>` when utilizing these tools against GMod maps so that it successfully locates and mounts the correct required core HL2 library resources.
 
 ## License
 
-Derived from the Source SDK 2013. See [LICENSE](LICENSE) for details.
+Derived from the Source SDK 2013 Base. See [LICENSE](LICENSE) for details.
