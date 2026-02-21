@@ -16,7 +16,7 @@ A patched version of the base VBSP engine geometry compiler.
 - **Detail Sprite Support:** Retains detail sprites and correct alpha-blending logic on WorldVertexTransition (WVT) faces after patches.
 - **Integration:** Hooks smoothly into the Lightmap Optimizer pipeline.
 
-### 3. VVIS CUDA/OptiX (`vvis_cuda.exe` / `vvis_optix.exe`)
+### 3. VVIS OptiX (`vvis_optix.exe`)
 A hardware-accelerated Visibility Processor.
 - **GPU PortalFlow Raytracing:** Shifts the heavy inner-loop raycasting workload to RT Cores on modern NVIDIA GPUs utilizing CUDA and OptiX SDK 9.1.
 - **Hybrid Architecture:** Combines fast CPU Setup and bounds checking with GPU massive concurrency trace calls.
@@ -39,7 +39,7 @@ Hardware-accelerated global illumination and radiosity bounce lighting.
 ## Build Requirements
 
 If compiling the tools from source:
-- Visual Studio 2026 (untested on older setups)
+- Visual Studio 2026 (untested on older versions)
 - NVIDIA CUDA SDK 13.1 (or newer)
 - NVIDIA OptiX SDK 9.1.0 
 - Python 3.10+ (for using `lmoptimizer`, tools, and validation scripts)
@@ -58,7 +58,7 @@ vvis_cuda.exe -cuda -game <path_to_mod_folder> <mapname>
 vrad_rtx.exe -game <path_to_mod_folder> <mapname>
 ```
 
-If the `-cuda` flag is omitted for VVIS, it defaults to the aggressively optimized parallel CPU path. 
+If the `-rtx` flag is omitted for VRAD, it defaults to the aggressively optimized parallel CPU path. 
 
 **Garry's Mod Note:** Because GMod binaries are unique, please specify `-binroot <Path_To_Source_SDK_2013_Multiplayer>` when utilizing these tools against GMod maps so that it successfully locates and mounts the correct required core HL2 library resources.
 
