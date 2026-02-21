@@ -60,19 +60,16 @@ echo DEBUG: Running NVCC...
 set "CONFIG_CLEAN=%CONFIG: =%"
 if /I "!CONFIG_CLEAN!"=="Debug" (
     set "IS_DEBUG=1"
-) else if /I "!CONFIG_CLEAN!"=="Debugx64" (
-    set "IS_DEBUG=1"
-) else (
-    set "IS_DEBUG=0"
-)
-
-if "!IS_DEBUG!"=="1" (
+if "%CONFIG%"=="Debug" (
     echo [NVCC] Debug build detected.
     set "NVCC_FLAGS=-g -G -D_DEBUG -O0 -Xcompiler /MTd"
 ) else (
     echo [NVCC] Release build detected.
     set "NVCC_FLAGS=-O3 -Xcompiler /MT"
 )
+
+:: Suppress systemic warnings
+set "NVCC_FLAGS=!NVCC_FLAGS! -diag-suppress 174,815,1394,997 -Xcompiler /wd4267"
 
 rem Removed -I"..\thirdparty\optix\include" and changed -ptx to -c for object compilation
 rem Quote all flags and capture all arguments robustly

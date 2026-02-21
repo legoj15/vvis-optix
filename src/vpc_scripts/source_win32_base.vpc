@@ -52,7 +52,7 @@ $Configuration
 
 		// warning C4316: object allocated on the heap may not be aligned 16
 		$DisableSpecificWarnings	"$BASE;4316" [$AT_LEAST_VS2013]
-
+		$DisableSpecificWarnings	"$BASE;4267" // Conversion from 'size_t' to 'int', possible loss of data
 		$DisableSpecificWarnings	"$BASE;5033" [$AT_LEAST_VS2019] // 'register' is no longer a supported storage class
 		$DisableSpecificWarnings	"$BASE;5054" [$AT_LEAST_VS2019] // operator '|': deprecated between enumerations of different types
 		$DisableSpecificWarnings	"$BASE;5055" [$AT_LEAST_VS2019] // operator '>': deprecated between enumerations and floating-point types

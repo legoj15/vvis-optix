@@ -21,7 +21,7 @@ if "!MSBUILD_PATH!"=="" (
 echo [INFO] Found MSBuild: "!MSBUILD_PATH!"
 
 :: 2. Set Build Parameters
-set "SLN_FILE=vvis.sln"
+set "SLN_FILE=mapping_tools.sln"
 set "CONFIG=Release"
 set "PLATFORM=win64"
 
@@ -35,12 +35,12 @@ echo.
     /m ^
     /t:Build ^
     /fl ^
-    /flp:LogFile=build_vvis.log;Verbosity=normal ^
+    /flp:LogFile=build_tools.log;Verbosity=normal ^
     /consoleloggerparameters:Summary;Verbosity=minimal
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo [ERROR] Build failed. See build_vvis.log for details.
+    echo [ERROR] Build failed. See build_tools.log for details.
     exit /b %ERRORLEVEL%
 )
 

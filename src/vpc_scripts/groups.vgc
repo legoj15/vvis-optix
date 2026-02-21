@@ -10,8 +10,15 @@
 
 $Group "everything"
 {
+	"fgdlib"
+	"lzma"
 	"mathlib"
+	"raytrace"
+	"tgadiff"
 	"tier1"
+	"vbsp"
+	"vrad_dll"
+	"vrad_launcher"
 	"vvis_dll"
 	"vvis_launcher"
 }

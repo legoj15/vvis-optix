@@ -513,9 +513,13 @@ FodyWeavers.xsd
 *.vbsp_hash
 *.ref_hash
 *.ref_time
+
 game/bin/x64/bsp_unit_tests/d1_trainstation_02_hrcs.vmf
 game/bin/x64/test_vvis_optix_production_harder.bat
 game/bin/x64/bsp_unit_tests/cpu/d1_trainstation_02_hrcs.vmf
 src/utils/vvis/nvcc_optix_stderr.txt
 src/utils/vvis/nvcc_optix_stdout.txt
-/.agents
+src/raytrace/nvcc_stderr.txt
+src/raytrace/nvcc_stdout.txt
+src/raytrace/nvcc_optix_stdout.txt
+src/raytrace/nvcc_optix_stderr.txt

@@ -947,7 +947,7 @@ void PrintUsage(int argc, char **argv) {
       "  -vproject <directory> : Override the VPROJECT environment variable.\n"
       "  -game <directory>     : Same as -vproject.\n"
       "  -binroot <directory>  : Overrides the base binary path (to find "
-      "the "bin\\x64" folder).\n"
+      "the \"bin\\x64\" folder).\n"
       "\n"
       "Other options:\n"
       "  -novconfig      : Don't bring up graphical UI on vproject errors.\n"

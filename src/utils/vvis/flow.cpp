@@ -408,7 +408,6 @@ void DumpPortalTrace(pstack_t *pStack) {
 }
 
 void WritePortalTrace(const char *source) {
-  Vector mid;
   FILE *linefile;
   char filename[1024];
 
@@ -444,7 +443,7 @@ void RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack) {
   portal_t *p;
   plane_t backplane;
   leaf_t *leaf;
-  int i, j;
+  int i;
   long *test, *might, *vis, more;
   int pnum;
 

@@ -1,0 +1,90 @@
+//-----------------------------------------------------------------------------
+//	RAYTRACE.VPC
+//
+//	Project Script - OptiX RTX-Accelerated Ray Tracing
+//-----------------------------------------------------------------------------
+
+$Macro SRCDIR		".."
+$Macro OPTIX_PATH	"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.1.0"
+$Include "$SRCDIR\vpc_scripts\source_lib_base.vpc"
+
+$Configuration
+{
+	$Compiler
+	{
+		$AdditionalIncludeDirectories		"$BASE;$SRCDIR\public;$SRCDIR\public\tier0;$SRCDIR\public\tier1;$SRCDIR\utils\common;$(CUDA_PATH)\include;$OPTIX_PATH\include"
+		$PreprocessorDefinitions			"$BASE;VRAD_RTX_CUDA_SUPPORT"
+	}
+	
+	// Note: raytrace is a static library (.lib), not an executable
+	// CUDA libraries will be linked by the final executable (vrad.exe)
+	// We just need to make sure raytrace_cuda.obj is included in the lib
+	
+	$PreBuildEvent
+	{
+		$CommandLine						"cd $(ProjectDir) && call nvcc_compile.bat && call optix_compile.bat"
+		$Description						"Compiling CUDA and OptiX kernels..."
+	}
+
+	$Librarian
+	{
+		$AdditionalDependencies				"$BASE;Release\x64\raytrace_cuda.obj"
+	}
+}
+
+$Project "Raytrace"
+{
+	$Folder	"Source Files"
+	{
+		$File	"raytrace.cpp"
+		$File	"trace2.cpp"
+		$File	"trace3.cpp"
+		$File	"raytrace_gpu.cpp"
+		$File	"raytrace_optix.cpp"
+		$File	"direct_lighting_gpu.cpp"
+	}
+	
+	$Folder	"Header Files"
+	{
+		$File	"raytrace.h"
+		$File	"raytrace_cuda.h"
+		$File	"raytrace_optix.h"
+		$File	"raytrace_shared.h"
+		$File	"direct_lighting_gpu.h"
+		$File	"gpu_scene_data.h"
+		$File	"visibility_gpu.h"
+	}
+	
+	$Folder "CUDA Files"
+	{
+		$File	"raytrace_cuda.cu"		[$WIN32]
+		{
+			$Configuration
+			{
+				$CustomBuildStep
+				{
+					$CommandLine		"REM Handled by PreBuildEvent"
+					$Outputs			"$(ProjectDir)Release\x64\raytrace_cuda.obj"
+				}
+			}
+		}
+		
+		$File	"Release\x64\raytrace_cuda.obj"		[$WIN32]
+	}
+	
+	$Folder "OptiX Files"
+	{
+		$File	"optix_kernels.cu"		[$WIN32]
+		{
+			$Configuration
+			{
+				$CustomBuildStep
+				{
+					$CommandLine		"REM Handled by PreBuildEvent - compiled to PTX"
+					$Outputs			"..\..\game\bin\x64\optix_kernels.ptx"
+				}
+			}
+		}
+	}
+}
+
