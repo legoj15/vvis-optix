@@ -196,10 +196,9 @@ def _worker_init(bsp_path: str, eye_positions: List[Vec3], vpk_paths=None):
         for vp in vpk_paths:
             try:
                 r = VPKReader(Path(vp))
-                if r.read():
-                    vpk_readers.append(r)
-            except Exception:
-                pass
+                vpk_readers.append(r)
+            except Exception as e:
+                print(f"VPK Init Worker Error: {e}", flush=True)
 
     _worker_world = CollisionWorld(bsp, vpk_readers=vpk_readers, verbose=False)
     _worker_eye_positions = eye_positions
@@ -246,22 +245,10 @@ def _worker_check_face(work_item):
     if not nearby_indices:
         return (face_idx, False, -1.0)
     
-    # PVS pre-filter: only keep eyes whose cluster can see this face's cluster.
-    # Bypass PVS for nearby eyes — PVS is conservative and can incorrectly
-    # reject adjacent clusters.  At close range the ray trace is definitive.
-    PVS_BYPASS_DIST = 1024.0
-    PVS_BYPASS_DIST_SQ = PVS_BYPASS_DIST * PVS_BYPASS_DIST
+    # PVS pre-filter: rigidly restrict to VBSP portal visibility clusters
     if face_cluster >= 0:
         pvs_ok = []
         for idx in nearby_indices:
-            # Always include nearby eyes regardless of PVS
-            eye = eye_positions[idx]
-            dx = eye[0] - centroid[0]
-            dy = eye[1] - centroid[1]
-            dz = eye[2] - centroid[2]
-            if dx*dx + dy*dy + dz*dz < PVS_BYPASS_DIST_SQ:
-                pvs_ok.append(idx)
-                continue
             ec = eye_clusters[idx]
             if ec < 0 or world.is_cluster_visible(ec, face_cluster):
                 pvs_ok.append(idx)
@@ -320,6 +307,11 @@ def _worker_check_face(work_item):
         for si, sample in enumerate(offset_samples):
             to_eye = _vec_sub(eye, sample)
             
+            # Backface culling early out
+            if normal is not None:
+                if to_eye[0]*normal[0] + to_eye[1]*normal[1] + to_eye[2]*normal[2] < 0:
+                    continue
+                    
             dist = _vec_length(to_eye)
             if dist < 1.0 or dist > MAX_VIS_DISTANCE:
                 continue
@@ -336,6 +328,8 @@ def _worker_check_face(work_item):
                         continue  # Face not visible, only probe space
                 if dist < min_dist:
                     min_dist = dist
+                if face_idx == 2904:
+                    print(f"DEBUG 2904 BREACH: eye={eye}, sample={sample}, fraction={hit.fraction}", flush=True)
                 return (face_idx, True, round(min_dist, 1))
     
     return (face_idx, False, -1.0)
@@ -418,8 +412,8 @@ class VisibilityOracle:
                 skipped_count += 1
                 continue
             
-            # Generate surface + probe sample points
-            surface_pts, probe_pts = _face_sample_points(verts, normal=normal)
+            # Generate surface sample points (probe points removed)
+            surface_pts, _ = _face_sample_points(verts, normal=normal)
             
             offset_surface = []
             for s in surface_pts:
@@ -429,7 +423,7 @@ class VisibilityOracle:
                     s[2] + normal[2]))
             
             n_surface = len(offset_surface)
-            all_samples = offset_surface + probe_pts
+            all_samples = offset_surface # probe_pts removed
             
             work_items.append((fi, all_samples, n_surface, normal))
         
@@ -615,19 +609,10 @@ class VisibilityOracle:
         if not nearby_indices:
             return False, min_dist
         
-        # PVS pre-filter: bypass for nearby eyes (within 1024u).
-        PVS_BYPASS_DIST = 1024.0
-        PVS_BYPASS_DIST_SQ = PVS_BYPASS_DIST * PVS_BYPASS_DIST
+        # PVS pre-filter: rigidly restrict to VBSP portal visibility clusters
         if face_cluster >= 0:
             pvs_ok = []
             for idx in nearby_indices:
-                eye = self.eye_positions[idx]
-                dx = eye[0] - centroid[0]
-                dy = eye[1] - centroid[1]
-                dz = eye[2] - centroid[2]
-                if dx*dx + dy*dy + dz*dz < PVS_BYPASS_DIST_SQ:
-                    pvs_ok.append(idx)
-                    continue
                 ec = self.eye_clusters[idx]
                 if ec < 0 or self.world.is_cluster_visible(ec, face_cluster):
                     pvs_ok.append(idx)
@@ -685,11 +670,16 @@ class VisibilityOracle:
             for si, sample in enumerate(samples):
                 to_eye = _vec_sub(eye, sample)
                 
+                # Backface culling early out
+                if normal is not None:
+                    if to_eye[0]*normal[0] + to_eye[1]*normal[1] + to_eye[2]*normal[2] < 0:
+                        continue
+                        
                 dist = _vec_length(to_eye)
                 if dist < 1.0 or dist > MAX_VIS_DISTANCE:
                     continue
                 
-                hit = self.world.trace_ray(eye, sample, MASK_VISIBLE)
+                hit = self.world.trace_ray_full(eye, sample, MASK_VISIBLE)
                 
                 if hit.fraction >= 0.99:
                     # Probe hit: confirm the face centroid is reachable.
@@ -699,6 +689,7 @@ class VisibilityOracle:
                             continue  # Face not visible, only probe space
                     if dist < min_dist:
                         min_dist = dist
+                    print(f"DEBUG BREACH {fi}: eye={eye}, sample={sample}, frac={hit.fraction}", flush=True)
                     return True, min_dist
         
         return False, min_dist

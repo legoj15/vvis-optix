@@ -198,6 +198,9 @@ def main():
             bsp_indices = set(fld.bsp_face_indices)
             if bsp_indices and bsp_indices.issubset(nv_bsp_faces):
                 never_visible_sides.add(sid)
+            elif sid in [142, 148, 153]:
+                missing = bsp_indices - nv_bsp_faces
+                print(f"DEBUG: VMF Side {sid} FAILED to turn invisible because indices {missing} were evaluated as VISIBLE by the Oracle!")
         never_visible_sides -= texlight_sides
 
     _VIS_MAT = 'dev/dev_measuregeneric01'

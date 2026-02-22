@@ -249,47 +249,7 @@ class CollisionWorld:
             
             # Emulate precise Source Engine continuous hull sweeps by wrapping thin fences 
             # with explicit physical proxy blocks. This solves the discrete grid teleporting bypass.
-            
-            if 'exterior_fence003b' in prop.model_name.lower():
-                # For exterior_fence003b:
-                # 1. Provide the physical mesh proxy from floor (-74.37 local Z) up to origin Z (gate handle top)
-                # 2. Add an extra AABB for the upper barbed wire (from Z=0 to Z=32.92) to block crouching OVER the fence centrally.
-                # Because the fence is X-thickened, it prevents grid tunneling, and provides a ledge at Z=0 for jumping.
-                
-                # Main body (from -74 down to origin, thick to prevent teleport parsing)
-                hull_base_min = (-5.0, -24.0, -74.5)
-                # EPSILON FIX: Use -0.1 instead of 0.0 so a player precisely standing at Z=0.0 doesn't mathematically overlap the top face.
-                hull_base_max = (5.0, 24.0, -0.1) 
-                
-                for box_min, box_max in [(hull_base_min, hull_base_max)]:
-                    corners = [
-                        (box_min[0], box_min[1], box_min[2]),
-                        (box_max[0], box_min[1], box_min[2]),
-                        (box_max[0], box_max[1], box_min[2]),
-                        (box_min[0], box_max[1], box_min[2]),
-                        (box_min[0], box_min[1], box_max[2]),
-                        (box_max[0], box_min[1], box_max[2]),
-                        (box_max[0], box_max[1], box_max[2]),
-                        (box_min[0], box_max[1], box_max[2])
-                    ]
-                    
-                    indices = [
-                        (0, 1, 2), (0, 2, 3), # Bottom
-                        (4, 5, 6), (4, 6, 7), # Top
-                        (0, 1, 5), (0, 5, 4), # Front
-                        (3, 2, 6), (3, 6, 7), # Back
-                        (0, 3, 7), (0, 7, 4), # Left
-                        (1, 2, 6), (1, 6, 5)  # Right
-                    ]
-                    
-                    for i0, i1, i2 in indices:
-                        v0 = PHYReader.transform_point(corners[i0], prop.origin, prop.angles)
-                        v1 = PHYReader.transform_point(corners[i1], prop.origin, prop.angles)
-                        v2 = PHYReader.transform_point(corners[i2], prop.origin, prop.angles)
-                        self._prop_triangles.append((v0, v1, v2))
-                        
-                # Notice we skip any broken `.phy` entirely:
-                continue
+            # (UPDATE: Deprecated. Universal IVP axis matrix Swizzle correctly handles the raw .phy bounds for all props!)
                 
             use_aabb_proxy = False
             
@@ -362,9 +322,10 @@ class CollisionWorld:
                             sv1 = solid.vertices[i1]
                             sv2 = solid.vertices[i2]
                             # IVP physics engine stores coordinates in meters. We must scale to Source Engine inches.
-                            sv0_s = (sv0[0] * IVP_TO_SOURCE, sv0[1] * IVP_TO_SOURCE, sv0[2] * IVP_TO_SOURCE)
-                            sv1_s = (sv1[0] * IVP_TO_SOURCE, sv1[1] * IVP_TO_SOURCE, sv1[2] * IVP_TO_SOURCE)
-                            sv2_s = (sv2[0] * IVP_TO_SOURCE, sv2[1] * IVP_TO_SOURCE, sv2[2] * IVP_TO_SOURCE)
+                            # IVP is rotated relative to Source. Correct Swizzle: X_src = -Z_ivp, Y_src = Y_ivp, Z_src = -X_ivp
+                            sv0_s = (-sv0[2] * IVP_TO_SOURCE, sv0[1] * IVP_TO_SOURCE, -sv0[0] * IVP_TO_SOURCE)
+                            sv1_s = (-sv1[2] * IVP_TO_SOURCE, sv1[1] * IVP_TO_SOURCE, -sv1[0] * IVP_TO_SOURCE)
+                            sv2_s = (-sv2[2] * IVP_TO_SOURCE, sv2[1] * IVP_TO_SOURCE, -sv2[0] * IVP_TO_SOURCE)
                                 
                             v0 = PHYReader.transform_point(sv0_s, prop.origin, prop.angles)
                             v1 = PHYReader.transform_point(sv1_s, prop.origin, prop.angles)

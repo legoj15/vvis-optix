@@ -362,7 +362,8 @@ class ReachabilityMap:
             print(f"  Found {len(spawns)} spawn point(s)")
         
         # BFS queue: (gx, gy, gz, state)
-        queue: deque = deque()
+        self.queue: deque = deque()
+        self.parents = {} # Added for BFS backtrace
         
         # Seed with spawn points
         for sp in spawns:
@@ -374,15 +375,17 @@ class ReachabilityMap:
                 feet_z = sp[2]
             
             gx, gy, gz = self.grid.world_to_grid(sp[0], sp[1], feet_z)
+            cell = (gx, gy, gz)
             if self.grid.in_bounds(gx, gy, gz):
                 state = CELL_REACH_STAND
-                self._set_state(gx, gy, gz, state)
-                self.reachable[(gx, gy, gz)] = state
-                # No parent for initial seed points
-                queue.append((gx, gy, gz, state))
-                if self.verbose:
-                    print(f"  Seed: ({sp[0]:.0f},{sp[1]:.0f},{feet_z:.0f}) "
-                          f"→ grid ({gx},{gy},{gz})")
+                if cell not in self.reachable:
+                    self._set_state(gx, gy, gz, state)
+                    self.reachable[cell] = state
+                    self.parents[cell] = None # No parent for initial seed points
+                    self.queue.append((gx, gy, gz, state))
+                    if self.verbose:
+                        print(f"  Seed: ({sp[0]:.0f},{sp[1]:.0f},{feet_z:.0f}) "
+                              f"→ grid ({gx},{gy},{gz})")
         
         # Seed with ladders and dismounts
         for ent in self.world.entities:
@@ -409,15 +412,17 @@ class ReachabilityMap:
                             for lhx in (-1, 0, 1):
                                 for lhy in (-1, 0, 1):
                                     gx, gy, gz = self.grid.world_to_grid(px + lhx*8.0, py + lhy*8.0, pz)
+                                    cell = (gx, gy, gz)
                                     if self.grid.in_bounds(gx, gy, gz):
                                         wx, wy, wz = self.grid.grid_to_world(gx, gy, gz)
                                         # Ensure the snapped grid cell isn't physically inside a wall
                                         if not self.world.hull_test((wx, wy, wz + 18.0), HULL_CROUCH):
                                             state = CELL_REACH_STAND
-                                            self._set_state(gx, gy, gz, state)
-                                            self.reachable[(gx, gy, gz)] = state
-                                            # No parent for initial seed points
-                                            queue.append((gx, gy, gz, state))
+                                            if cell not in self.reachable:
+                                                self._set_state(gx, gy, gz, state)
+                                                self.reachable[cell] = state
+                                                self.parents[cell] = None # No parent for initial seed points
+                                                self.queue.append((gx, gy, gz, state))
                     except ValueError:
                         pass
             
@@ -427,12 +432,14 @@ class ReachabilityMap:
                     try:
                         px, py, pz = map(float, orig.split())
                         gx, gy, gz = self.grid.world_to_grid(px, py, pz)
+                        cell = (gx, gy, gz)
                         if self.grid.in_bounds(gx, gy, gz):
                             state = CELL_REACH_STAND
-                            self._set_state(gx, gy, gz, state)
-                            self.reachable[(gx, gy, gz)] = state
-                            # No parent for initial seed points
-                            queue.append((gx, gy, gz, state))
+                            if cell not in self.reachable:
+                                self._set_state(gx, gy, gz, state)
+                                self.reachable[cell] = state
+                                self.parents[cell] = None # No parent for initial seed points
+                                self.queue.append((gx, gy, gz, state))
                     except ValueError:
                         pass
         
@@ -445,8 +452,8 @@ class ReachabilityMap:
         t0 = time.perf_counter()
         cells_tested = 0
         
-        while queue:
-            gx, gy, gz, cur_state = queue.popleft()
+        while self.queue:
+            gx, gy, gz, cur_state = self.queue.popleft()
             cells_tested += 1
             
             wx, wy, wz = self.grid.grid_to_world(gx, gy, gz)
@@ -461,12 +468,6 @@ class ReachabilityMap:
                     
                     if not self.grid.in_bounds(nx, ny, nz):
                         continue
-                    # Check if already reached with equal or better state
-                    # We only want to update if the new state is better (e.g., standing vs crouching)
-                    # or if it's a new cell.
-                    existing_state = self._get_state(nx, ny, nz)
-                    if existing_state >= CELL_REACH_STAND and existing_state >= cur_state:
-                        continue
                     
                     nwx, nwy, nwz = self.grid.grid_to_world(nx, ny, nz)
                     # Verify there's a floor first
@@ -474,21 +475,22 @@ class ReachabilityMap:
                     if floor_z is not None:
                         # Snap to floor grid cell
                         _, _, fgz = self.grid.world_to_grid(nwx, nwy, floor_z)
-                        if self.grid.in_bounds(nx, ny, fgz):
-                            existing = self._get_state(nx, ny, fgz)
+                        neighbor_cell = (nx, ny, fgz)
+                        
+                        # Validate landing clearance!
+                        new_state = -1
+                        if self._can_stand(nwx, nwy, floor_z):
+                            new_state = CELL_REACH_STAND
+                        elif self._can_crouch(nwx, nwy, floor_z):
+                            new_state = CELL_REACH_CROUCH
                             
-                            # Validate landing clearance!
-                            new_state = -1
-                            if self._can_stand(nwx, nwy, floor_z):
-                                new_state = CELL_REACH_STAND
-                            elif self._can_crouch(nwx, nwy, floor_z):
-                                new_state = CELL_REACH_CROUCH
-                                
-                            if new_state > 0 and existing < new_state:
+                        if new_state > 0:
+                            existing_state = self._get_state(nx, ny, fgz)
+                            if existing_state < new_state: # Only update if new state is better
                                 self._set_state(nx, ny, fgz, new_state)
-                                self.reachable[(nx, ny, fgz)] = new_state
-                                self.parents[(nx, ny, fgz)] = (gx, gy, gz)
-                                queue.append((nx, ny, fgz, new_state))
+                                self.reachable[neighbor_cell] = new_state
+                                self.parents[neighbor_cell] = (gx, gy, gz)
+                                self.queue.append((nx, ny, fgz, new_state))
                                 break  # Found a valid walk, skip other dz
             
             # ─── Fall: check cells below ──────────────────────────────────
@@ -496,8 +498,8 @@ class ReachabilityMap:
             fall_floor = self._has_floor(wx, wy, wz, max_drop=4096.0)
             if fall_floor is not None and fall_floor < wz - STEP_HEIGHT:
                 _, _, fgz = self.grid.world_to_grid(wx, wy, fall_floor)
+                neighbor_cell = (gx, gy, fgz)
                 if self.grid.in_bounds(gx, gy, fgz):
-                    existing = self._get_state(gx, gy, fgz)
                     # Validate landing clearance!
                     new_state = -1
                     if self._can_stand(wx, wy, fall_floor):
@@ -505,11 +507,13 @@ class ReachabilityMap:
                     elif self._can_crouch(wx, wy, fall_floor):
                         new_state = CELL_REACH_CROUCH
                         
-                    if new_state > 0 and existing < new_state:
-                        self._set_state(gx, gy, fgz, new_state)
-                        self.reachable[(gx, gy, fgz)] = new_state
-                        self.parents[(gx, gy, fgz)] = (gx, gy, gz)
-                        queue.append((gx, gy, fgz, new_state))
+                    if new_state > 0:
+                        existing_state = self._get_state(gx, gy, fgz)
+                        if existing_state < new_state: # Only update if new state is better
+                            self._set_state(gx, gy, fgz, new_state)
+                            self.reachable[neighbor_cell] = new_state
+                            self.parents[neighbor_cell] = (gx, gy, gz)
+                            self.queue.append((gx, gy, fgz, new_state))
             
             # ─── Jump: check cells above ──────────────────────────────────
             # Players can crouch-jump from a standing or crouching state.
@@ -552,7 +556,7 @@ class ReachabilityMap:
                                     self._set_state(gx, gy, fgz, new_state)
                                     self.reachable[(gx, gy, fgz)] = new_state
                                     self.parents[(gx, gy, fgz)] = (gx, gy, gz)
-                                    queue.append((gx, gy, fgz, new_state))
+                                    self.queue.append((gx, gy, fgz, new_state))
                         
                         # Also add neighbors horizontally from the apex
                         for dx, dy in NEIGHBORS_XY:
@@ -562,11 +566,20 @@ class ReachabilityMap:
                                     continue
                                 jnwx, jnwy, _ = self.grid.grid_to_world(jnx, jny, jz)
                                 
-                                # Verify the entire horizontal path is clear for our crouched body
+                                # Verify horizontal path is clear for our crouched body.
+                                # Instead of a 1D point-ray (which threads the needle through
+                                # window meshes) or leaping blindly by 16 units (which quantum
+                                # tunnels over thin walls), we use a dense 4-unit interval 9-point hull probe.
                                 path_clear = True
-                                for step in range(1, dist + 1):
-                                    iwx = wx + dx * self.grid.res * step
-                                    iwy = wy + dy * self.grid.res * step
+                                
+                                dist_total = math.sqrt((jnwx - wx)**2 + (jnwy - wy)**2)
+                                steps = int(dist_total / 4.0)
+                                if steps == 0: steps = 1
+                                
+                                for step in range(1, steps + 1):
+                                    t = step / steps
+                                    iwx = wx + (jnwx - wx) * t
+                                    iwy = wy + (jnwy - wy) * t
                                     if not self._can_crouch(iwx, iwy, jwz):
                                         path_clear = False
                                         break
@@ -590,7 +603,7 @@ class ReachabilityMap:
                                                 self._set_state(jnx, jny, fgz, new_state)
                                                 self.reachable[(jnx, jny, fgz)] = new_state
                                                 self.parents[(jnx, jny, fgz)] = (gx, gy, gz)
-                                                queue.append((jnx, jny, fgz, new_state))
+                                                self.queue.append((jnx, jny, fgz, new_state))
                 else:
                     # Bug A fix: continue instead of break — a platform at
                     # this height may block _can_crouch, but higher cells
