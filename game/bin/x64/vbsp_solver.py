@@ -1,0 +1,576 @@
+"""
+VBSP-in-the-Loop Solver — bottom-up strategy with ground-truth vertex counts.
+
+Instead of starting at max quality and degrading, this solver:
+  1. Finds the lowest global lightmapscale that fits ALL BSP budgets
+     (vertices, leaffaces, faces — all capped at 65536)
+  2. Promotes high-priority faces (shadow detail) back to scale=1
+
+This produces much better results: the worst-case face is at the baseline
+(e.g. scale=2), not scale 16 or 27. Faces with rich lighting detail get
+promoted to scale=1 where they benefit most.
+
+Typical cost: ~3 VBSP calls for baseline + ~15 for promotion = ~60s total.
+"""
+from __future__ import annotations
+
+import shutil
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Set, Tuple
+
+from vertex_estimator import (
+    FaceExtent,
+    should_skip_face,
+    min_scale_no_subdivision,
+    min_scale_for_valid_extents,
+    DEFAULT_MAX_LIGHTMAP_DIM,
+)
+
+# BSP format limits (all use unsigned short indexing)
+BSP_LIMIT = 65536
+
+
+@dataclass
+class VBSPSolverResult:
+    """Result of the VBSP-in-the-loop solver."""
+    scales: Dict[int, int]            # side_id → optimized lightmapscale
+    vbsp_vertex_count: int            # Ground-truth vertex count from VBSP
+    vbsp_leafface_count: int          # Ground-truth leafface count from VBSP
+    vbsp_face_count: int              # Ground-truth face count from VBSP
+    vertex_budget: int                # Applied vertex budget
+    baseline_scale: int               # Global scale that fits budget
+    faces_promoted: int               # Faces promoted from baseline to 1
+    faces_at_baseline: int            # Faces left at baseline scale
+    faces_skipped: int                # Tool/trigger faces excluded
+    vbsp_calls: int                   # Number of VBSP invocations
+    solve_time: float                 # Total solve time in seconds
+    faces_clamped_by_detail: int = 0  # Faces held at min_scale due to %detailtype
+    binding_limit: str = "verts"      # Which limit is the tightest constraint
+    faces_pre_promoted: int = 0       # Faces pre-promoted to max_useful_scale (perfectly uniform)
+    faces_gradient_promoted: int = 0  # Faces pre-promoted due to monotonic gradient
+
+
+@dataclass
+class _FaceEntry:
+    """Internal face tracking for the solver."""
+    side_id: int
+    extent: FaceExtent
+    variance: float
+    luminance_range: float
+    has_detail: bool
+    perceptual_priority: float = 0.0  # std_dev × log₂(1+mean): detail × visibility
+    min_scale: int = 1       # Minimum allowed scale (e.g. 5 for %detailtype)
+    is_uniform: bool = False # True if perfectly uniform (pre-promoted)
+    is_gradient: bool = False  # True if monotonic gradient (pre-promoted)
+    max_useful_scale: int = 1  # Scale beyond which no more vertex savings
+
+
+@dataclass
+class _CountResult:
+    """Result from a VBSP count call."""
+    verts: int
+    leaffaces: int
+    faces: int
+    
+    def fits_budget(self, budget: int) -> bool:
+        """Check if ALL counts are within the budget."""
+        return (self.verts <= budget and
+                self.leaffaces <= budget and
+                self.faces <= budget)
+    
+    def worst_count(self) -> int:
+        """Return the highest count (the binding constraint)."""
+        return max(self.verts, self.leaffaces, self.faces)
+    
+    def binding_name(self, budget: int) -> str:
+        """Return which limit is binding (closest to or over budget)."""
+        items = [("verts", self.verts), ("leaffaces", self.leaffaces),
+                 ("faces", self.faces)]
+        return max(items, key=lambda x: x[1])[0]
+
+
+def solve_with_vbsp(
+    face_extents: List[FaceExtent],
+    lighting_data: Dict[int, object],
+    vmf_root: object,
+    side_map: Dict[int, object],
+    vbsp_exe: Path,
+    game_dir: Path,
+    input_vmf: Path,
+    vertex_budget: int = 65536,
+    max_lm_dim: int = DEFAULT_MAX_LIGHTMAP_DIM,
+    detail_type_materials: Optional[Set[str]] = None,
+    detail_min_scale: int = 5,
+    gradient_tolerance: float = 0.5,
+    coplanar_groups: Optional[List[List[int]]] = None,
+    emissive_sides: Optional[Set[int]] = None,
+    uniform_max_luminance: float = 0.0,
+    verbose: bool = False,
+) -> VBSPSolverResult:
+    """Solve for optimal lightmapscales using real VBSP counts.
+    
+    Bottom-up strategy:
+      Phase 1 — Find the lowest global scale that fits ALL budgets.
+      Phase 2 — Promote high-priority faces from baseline to scale=1.
+    """
+    from vmf_parser import VMFWriter
+    from vbsp_runner import count_vertices
+    
+    t_start = time.perf_counter()
+    vbsp_calls = 0
+    
+    # ─── Build face list ──────────────────────────────────────────────────────
+    entries: List[_FaceEntry] = []
+    skipped = 0
+    detail_set = detail_type_materials or set()
+    
+    for fe in face_extents:
+        if should_skip_face(fe.material, fe.brush_entity):
+            skipped += 1
+            continue
+        
+        ld = lighting_data.get(fe.side_id)
+        variance = ld.variance if ld else 0.0
+        lum_range = ld.luminance_range if ld else 0.0
+        has_detail = variance > 0.5 or lum_range > 2.0
+        priority = ld.perceptual_priority if ld else 0.0
+        
+        # Check if face is perfectly uniform (zero variation)
+        # But never pre-promote emissive (texlight) faces — their lightmap
+        # resolution controls light emission quality.
+        # Also, only pre-promote faces that are uniformly DARK. Fast VRAD
+        # doesn't trace bounced/indirect light, so bright faces may appear
+        # uniform when they actually have detail in a full compile.
+        face_is_emissive = (emissive_sides and fe.side_id in emissive_sides)
+        face_mean_lum = ld.mean_luminance if ld else 0.0
+        face_is_dark_enough = (face_mean_lum <= uniform_max_luminance)
+        face_uniform = ((ld.is_perfectly_uniform if ld else False)
+                        and not face_is_emissive
+                        and face_is_dark_enough)
+        
+        # Check if face has a monotonic gradient (only when gradient promotion is enabled)
+        # Same dark-enough check: bright gradients may be fast-compile artifacts.
+        face_gradient = ((ld.is_monotonic_gradient(gradient_tolerance)
+                         if ld and gradient_tolerance is not None else False)
+                         and not face_is_emissive
+                         and face_is_dark_enough)
+        
+        if fe.side_id in (153, 154, 141):
+            if ld:
+                print(f"Face {fe.side_id} [vbsp_solver]: "
+                      f"ld_valid={True} "
+                      f"perfectly_uniform={ld.is_perfectly_uniform} "
+                      f"is_never_visible={ld.is_never_visible} "
+                      f"emissive={face_is_emissive} "
+                      f"dark_enough={face_is_dark_enough} (mean={face_mean_lum} <= {uniform_max_luminance}) "
+                      f"-> uniform={face_uniform}", flush=True)
+            else:
+                print(f"Face {fe.side_id} [vbsp_solver]: NO LD! (skipped)", flush=True)
+        
+        # Determine minimum scale for this face
+        mat_lower = fe.material.lower().replace('\\', '/')
+        face_min_scale = detail_min_scale if mat_lower in detail_set else 1
+        
+        # Enforce VBSP fatal extent limit (126 luxels max per dimension)
+        # Only applies to displacement faces — brush faces are subdivided first
+        if fe.has_displacement:
+            face_min_scale = max(face_min_scale,
+                                 min_scale_for_valid_extents(fe.extent_s, fe.extent_t))
+        
+        # Compute max useful scale for this face
+        face_max_useful = min_scale_no_subdivision(
+            fe.extent_s, fe.extent_t, max_lm_dim)
+        
+        entries.append(_FaceEntry(
+            side_id=fe.side_id,
+            extent=fe,
+            variance=variance,
+            luminance_range=lum_range,
+            has_detail=has_detail,
+            perceptual_priority=priority,
+            min_scale=face_min_scale,
+            is_uniform=face_uniform,
+            is_gradient=face_gradient,
+            max_useful_scale=face_max_useful,
+        ))
+
+    
+    if not entries:
+        return VBSPSolverResult(
+            scales={}, vbsp_vertex_count=0, vbsp_leafface_count=0,
+            vbsp_face_count=0, vertex_budget=vertex_budget,
+            baseline_scale=1, faces_promoted=0, faces_at_baseline=0,
+            faces_skipped=skipped, vbsp_calls=0, solve_time=0.0,
+        )
+    
+    # Count pre-promoted faces
+    uniform_entries = [e for e in entries if e.is_uniform]
+    gradient_entries = [e for e in entries if e.is_gradient]
+    pre_promoted = len(uniform_entries) + len(gradient_entries)
+    
+    if verbose:
+        print(f"  VBSP Solver: {len(entries)} eligible faces, {skipped} skipped",
+              flush=True)
+        if len(uniform_entries) > 0:
+            print(f"  Pre-promoting {len(uniform_entries)} perfectly-uniform faces to "
+                  f"max_useful_scale", flush=True)
+        if len(gradient_entries) > 0:
+            print(f"  Pre-promoting {len(gradient_entries)} monotonic-gradient faces to "
+                  f"max_useful_scale", flush=True)
+    
+    # ─── Helper: apply scales to VMF and count everything ─────────────────────
+    temp_dir = Path(tempfile.mkdtemp(prefix='lmopt_'))
+    temp_vmf = temp_dir / input_vmf.name
+    writer = VMFWriter()
+    
+    def _count_with_scales(scale_assignments: Dict[int, int]) -> _CountResult:
+        """Apply scales to VMF, write temp file, call VBSP, return all counts."""
+        nonlocal vbsp_calls
+        
+        for sid, scale in scale_assignments.items():
+            node = side_map.get(sid)
+            if node:
+                node.set_property('lightmapscale', str(scale))
+        
+        writer.write_file(vmf_root, temp_vmf)
+        result = count_vertices(vbsp_exe, temp_vmf, game_dir, verbose=False)
+        vbsp_calls += 1
+        
+        return _CountResult(
+            verts=result.count,
+            leaffaces=result.leafface_count,
+            faces=result.face_count,
+        )
+    
+    try:
+        # ═══════════════════════════════════════════════════════════════════════
+        #  PHASE 1: Find baseline scale (linear scan 1, 2, 3, ...)
+        # ═══════════════════════════════════════════════════════════════════════
+        baseline_scale = 0
+        baseline_counts = _CountResult(0, 0, 0)
+        
+        for scale in range(1, 65):  # 1 through 64
+            # Detail-type faces get max(scale, min_scale)
+            # Uniform faces get max_useful_scale (pre-promoted)
+            all_at_scale = {}
+            for e in entries:
+                if e.is_uniform or e.is_gradient:
+                    all_at_scale[e.side_id] = max(e.max_useful_scale, e.min_scale)
+                else:
+                    all_at_scale[e.side_id] = max(scale, e.min_scale)
+            
+            if verbose:
+                print(f"  [VBSP call {vbsp_calls + 1}] "
+                      f"Testing global scale={scale}...", flush=True)
+            
+            counts = _count_with_scales(all_at_scale)
+            
+            if verbose:
+                under = counts.fits_budget(vertex_budget)
+                print(f"    Verts: {counts.verts:,}  "
+                      f"Leaffaces: {counts.leaffaces:,}  "
+                      f"Faces: {counts.faces:,}  "
+                      f"({'under' if under else 'OVER'} budget)",
+                      flush=True)
+            
+            if counts.fits_budget(vertex_budget):
+                baseline_scale = scale
+                baseline_counts = counts
+                break
+        
+        if baseline_scale == 0:
+            # Even scale=64 doesn't fit — map has too many brushes
+            if verbose:
+                print(f"  ✗ Map exceeds budget even at scale=64. "
+                      f"Too many brushes.", flush=True)
+            
+            t_end = time.perf_counter()
+            return VBSPSolverResult(
+                scales={e.side_id: 64 for e in entries},
+                vbsp_vertex_count=counts.verts,
+                vbsp_leafface_count=counts.leaffaces,
+                vbsp_face_count=counts.faces,
+                vertex_budget=vertex_budget,
+                baseline_scale=64,
+                faces_promoted=0,
+                faces_at_baseline=len(entries),
+                faces_skipped=skipped,
+                vbsp_calls=vbsp_calls,
+                solve_time=t_end - t_start,
+                binding_limit=counts.binding_name(vertex_budget),
+            )
+        
+        if baseline_scale == 1:
+            # Already under budget at scale=1 — apply pre-promotions for uniform faces
+            if verbose:
+                if pre_promoted > 0:
+                    print(f"  ✓ All faces fit at scale=1! "
+                          f"({pre_promoted} uniform faces pre-promoted)",
+                          flush=True)
+                else:
+                    print(f"  ✓ All faces fit at scale=1! No degradation needed.",
+                          flush=True)
+            
+            # Respect uniform/gradient faces' max_useful_scale
+            early_scales = {}
+            for e in entries:
+                if e.is_uniform or e.is_gradient:
+                    early_scales[e.side_id] = max(e.max_useful_scale, e.min_scale)
+                else:
+                    early_scales[e.side_id] = max(1, e.min_scale)
+            
+            # Apply to VMF tree
+            for sid, scale in early_scales.items():
+                node = side_map.get(sid)
+                if node:
+                    node.set_property('lightmapscale', str(scale))
+            
+            t_end = time.perf_counter()
+            return VBSPSolverResult(
+                scales=early_scales,
+                vbsp_vertex_count=baseline_counts.verts,
+                vbsp_leafface_count=baseline_counts.leaffaces,
+                vbsp_face_count=baseline_counts.faces,
+                vertex_budget=vertex_budget,
+                baseline_scale=1,
+                faces_promoted=len(entries) - pre_promoted,
+                faces_at_baseline=0,
+                faces_skipped=skipped,
+                vbsp_calls=vbsp_calls,
+                solve_time=t_end - t_start,
+                faces_pre_promoted=len(uniform_entries),
+                faces_gradient_promoted=len(gradient_entries),
+            )
+        
+        if verbose:
+            binding = baseline_counts.binding_name(vertex_budget)
+            headroom = vertex_budget - baseline_counts.worst_count()
+            print(f"\n  Baseline: scale={baseline_scale} → "
+                  f"verts={baseline_counts.verts:,}  "
+                  f"leaffaces={baseline_counts.leaffaces:,}  "
+                  f"faces={baseline_counts.faces:,}  "
+                  f"(binding: {binding}, headroom: {headroom:,})\n", flush=True)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        #  PHASE 2: Promote high-priority faces to scale=1
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # Sort by priority: highest variance first → promoted first
+        # Exclude pre-promoted uniform/gradient faces from promotion candidates
+        promotable = [e for e in entries if not e.is_uniform and not e.is_gradient]
+        promotable.sort(key=lambda e: e.perceptual_priority, reverse=True)
+        
+        # ─── Build promotion units from coplanar groups ────────────────────────
+        # Faces sharing a coplanar group are promoted/demoted together.
+        # Ungrouped faces are singleton units.
+        if coplanar_groups:
+            # Build side_id → group_index mapping
+            sid_to_group = {}
+            for gi, group in enumerate(coplanar_groups):
+                for sid in group:
+                    sid_to_group[sid] = gi
+            
+            # Build units: collect promotable entries per group
+            group_entries: Dict[int, List[_FaceEntry]] = {}
+            singleton_entries: List[_FaceEntry] = []
+            for e in promotable:
+                gi = sid_to_group.get(e.side_id)
+                if gi is not None:
+                    group_entries.setdefault(gi, []).append(e)
+                else:
+                    singleton_entries.append(e)
+            
+            # Each group's priority is the max priority among its members
+            promotion_units: List[List[_FaceEntry]] = []
+            for gi, elist in group_entries.items():
+                promotion_units.append(elist)
+            for e in singleton_entries:
+                promotion_units.append([e])
+            
+            promotion_units.sort(
+                key=lambda unit: max(e.perceptual_priority for e in unit),
+                reverse=True)
+        else:
+            # No groups — each face is its own unit
+            promotion_units = [[e] for e in promotable]
+        
+        # Flatten for total face count
+        total_promotable_faces = sum(len(u) for u in promotion_units)
+        
+        if verbose:
+            # Show top few candidates
+            multi_unit_count = sum(1 for u in promotion_units if len(u) > 1)
+            print(f"  Top promotion candidates (by perceptual priority):", flush=True)
+            shown = 0
+            for unit in promotion_units[:5]:
+                for e in unit[:3]:
+                    shown += 1
+                    print(f"    #{shown}: side={e.side_id} priority={e.perceptual_priority:.1f} "
+                          f"variance={e.variance:.2f} lum_range={e.luminance_range:.1f}"
+                          f"{' [group of '+str(len(unit))+']' if len(unit)>1 else ''}",
+                          flush=True)
+            if len(promotion_units) > 5:
+                print(f"    ... and {len(promotion_units) - 5} more units "
+                      f"({total_promotable_faces - shown} faces)", flush=True)
+            if pre_promoted > 0:
+                print(f"  ({pre_promoted} uniform faces excluded from promotion)",
+                      flush=True)
+            if multi_unit_count > 0:
+                print(f"  ({multi_unit_count} coplanar groups treated as "
+                      f"atomic promotion units)", flush=True)
+            
+            print(flush=True)
+        
+        # Binary search: find the largest N (units) such that promoting
+        # units[0..N-1] to scale=1 (rest at baseline) stays under ALL budgets.
+        lo, hi = 0, len(promotion_units)
+        best_n = 0
+        best_counts = baseline_counts
+        
+        if verbose:
+            print(f"  Binary search: promoting units to scale=1 "
+                  f"(0..{len(promotion_units)} units, "
+                  f"~{max(1, len(promotion_units)).bit_length()} steps)", flush=True)
+        
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            
+            if mid == 0:
+                # No promotions = baseline (already known to be under budget)
+                lo = mid + 1
+                continue
+            
+            # Build assignment: promote top-mid units to their best scale,
+            # rest at baseline. Uniform faces always stay at max_useful_scale.
+            scales = {}
+            for e in uniform_entries:
+                scales[e.side_id] = max(e.max_useful_scale, e.min_scale)
+            for e in gradient_entries:
+                scales[e.side_id] = max(e.max_useful_scale, e.min_scale)
+            for i, unit in enumerate(promotion_units):
+                for entry in unit:
+                    if i < mid:
+                        # Promote, but respect min_scale floor
+                        scales[entry.side_id] = max(1, entry.min_scale)
+                    else:
+                        scales[entry.side_id] = max(baseline_scale, entry.min_scale)
+            
+            promoted_faces = sum(len(u) for u in promotion_units[:mid])
+            if verbose:
+                print(f"  [VBSP call {vbsp_calls + 1}] "
+                      f"Promote {mid}/{len(promotion_units)} units "
+                      f"({promoted_faces} faces) to scale=1...",
+                      flush=True)
+            
+            counts = _count_with_scales(scales)
+            
+            if verbose:
+                under = counts.fits_budget(vertex_budget)
+                binding = counts.binding_name(vertex_budget)
+                print(f"    Verts: {counts.verts:,}  "
+                      f"Leaffaces: {counts.leaffaces:,}  "
+                      f"({'under' if under else 'OVER'}, binding: {binding})",
+                      flush=True)
+            
+            if counts.fits_budget(vertex_budget):
+                # Under budget — try promoting more
+                best_n = mid
+                best_counts = counts
+                lo = mid + 1
+            else:
+                # Over budget — promote fewer
+                hi = mid - 1
+        
+        best_promoted_faces = sum(len(u) for u in promotion_units[:best_n])
+        if verbose:
+            print(f"\n  Binary search result: {best_n} units promoted to scale=1 "
+                  f"({best_promoted_faces} faces), "
+                  f"{total_promotable_faces - best_promoted_faces} at scale={baseline_scale}, "
+                  f"{pre_promoted} pre-promoted (uniform) "
+                  f"→ verts={best_counts.verts:,} "
+                  f"leaffaces={best_counts.leaffaces:,}\n", flush=True)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        #  Apply final scales and return
+        # ═══════════════════════════════════════════════════════════════════════
+        final_scales = {}
+        # Uniform/gradient faces stay at max_useful_scale
+        for e in uniform_entries:
+            final_scales[e.side_id] = max(e.max_useful_scale, e.min_scale)
+        for e in gradient_entries:
+            final_scales[e.side_id] = max(e.max_useful_scale, e.min_scale)
+        # Promoted units go to scale=1, rest at baseline
+        for i, unit in enumerate(promotion_units):
+            for entry in unit:
+                if i < best_n:
+                    final_scales[entry.side_id] = max(1, entry.min_scale)
+                else:
+                    final_scales[entry.side_id] = max(baseline_scale, entry.min_scale)
+        
+        # Apply to VMF tree
+        for sid, scale in final_scales.items():
+            node = side_map.get(sid)
+            if node:
+                node.set_property('lightmapscale', str(scale))
+        
+        t_end = time.perf_counter()
+        
+        clamped_by_detail = sum(1 for e in entries if e.min_scale > 1)
+        
+        result = VBSPSolverResult(
+            scales=final_scales,
+            vbsp_vertex_count=best_counts.verts,
+            vbsp_leafface_count=best_counts.leaffaces,
+            vbsp_face_count=best_counts.faces,
+            vertex_budget=vertex_budget,
+            baseline_scale=baseline_scale,
+            faces_promoted=best_promoted_faces,
+            faces_at_baseline=total_promotable_faces - best_promoted_faces,
+            faces_skipped=skipped,
+            vbsp_calls=vbsp_calls,
+            solve_time=t_end - t_start,
+            faces_clamped_by_detail=clamped_by_detail,
+            binding_limit=best_counts.binding_name(vertex_budget),
+            faces_pre_promoted=len(uniform_entries),
+            faces_gradient_promoted=len(gradient_entries),
+        )
+        
+        if verbose:
+            _print_vbsp_solver_summary(result)
+        
+        return result
+    
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _print_vbsp_solver_summary(result: VBSPSolverResult) -> None:
+    """Print a summary of VBSP solver results."""
+    under = (result.vbsp_vertex_count <= result.vertex_budget and
+             result.vbsp_leafface_count <= result.vertex_budget and
+             result.vbsp_face_count <= result.vertex_budget)
+    status = "UNDER BUDGET" if under else "OVER BUDGET"
+    
+    print(f"\n  VBSP Solver: {status} after {result.vbsp_calls} VBSP calls "
+          f"({result.solve_time:.1f}s)", flush=True)
+    print(f"  Vertices:  {result.vbsp_vertex_count:,}", flush=True)
+    print(f"  Leaffaces: {result.vbsp_leafface_count:,}", flush=True)
+    print(f"  Faces:     {result.vbsp_face_count:,}", flush=True)
+    print(f"  Budget:    {result.vertex_budget:,} "
+          f"(binding: {result.binding_limit})", flush=True)
+    print(f"  Baseline scale: {result.baseline_scale}", flush=True)
+    print(f"  Faces promoted to scale=1: {result.faces_promoted}", flush=True)
+    print(f"  Faces at baseline (scale={result.baseline_scale}): "
+          f"{result.faces_at_baseline}", flush=True)
+    if result.faces_pre_promoted > 0:
+        print(f"  Faces pre-promoted (uniform): {result.faces_pre_promoted}",
+              flush=True)
+    if result.faces_gradient_promoted > 0:
+        print(f"  Faces pre-promoted (gradient): {result.faces_gradient_promoted}",
+              flush=True)

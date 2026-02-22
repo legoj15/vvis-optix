@@ -137,9 +137,11 @@ bld/
 !game/bin/
 !game/bin/x64/
 game/bin/x64/*
-!game/bin/x64/test_vvis*
-!game/bin/x64/vis_simulator*
+!game/bin/x64/*.ps*
+!game/bin/x64/*.bat
 !game/bin/x64/bsp_unit_tests/
+!game/bin/x64/*.py
+game/bin/x64/test*.py
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
