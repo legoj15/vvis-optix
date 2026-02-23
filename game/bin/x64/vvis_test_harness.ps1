@@ -1,5 +1,5 @@
 # VVIS-OPTIX Three-Way Test Harness
-# Shared engine for all validation tests. Called by run_tests.ps1 with a
+# Shared engine for all validation tests. Called by run_vvis_tests.ps1 with a
 # per-test configuration hashtable.
 #
 # Three-Way Strategy:
@@ -61,12 +61,12 @@ foreach ($tool in $tools) {
 
 # --- Deploy vvis_optix binary and DLL to SDK directory ---
 # Source engine tools load DLLs relative to the executable's directory.
-# vvis_optix.exe needs vvis_dll_optix.dll alongside it in the SDK's bin\x64.
+# vvis_optix.exe needs vvis_optix_dll.dll alongside it in the SDK's bin\x64.
 $srcExe = Join-Path $SCRIPT_DIR "vvis_optix.exe"
-$srcDll = Join-Path $SCRIPT_DIR "vvis_dll_optix.dll"
+$srcDll = Join-Path $SCRIPT_DIR "vvis_optix_dll.dll"
 $srcPtx = Join-Path $SCRIPT_DIR "vvis_optix.ptx"
 $dstExe = Join-Path $SDK_BIN "vvis_optix.exe"
-$dstDll = Join-Path $SDK_BIN "vvis_dll_optix.dll"
+$dstDll = Join-Path $SDK_BIN "vvis_optix_dll.dll"
 $dstPtx = Join-Path $SDK_BIN "vvis_optix.ptx"
 Copy-Item $srcExe $dstExe -Force
 if (Test-Path $srcDll) { Copy-Item $srcDll $dstDll -Force }

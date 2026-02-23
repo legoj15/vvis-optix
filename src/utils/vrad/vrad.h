@@ -359,7 +359,6 @@ void MakeTnodes(dmodel_t *bm);
 void PairEdges(void);
 
 void SaveVertexNormals(void);
-void BuildOrigFaceInterpData(void);
 
 qboolean IsIncremental(char *filename);
 int SaveIncremental(char *filename);

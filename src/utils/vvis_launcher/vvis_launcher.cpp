@@ -28,7 +28,7 @@ char *GetLastErrorString() {
 
 int main(int argc, char *argv[]) {
   CommandLine()->CreateCmdLine(argc, argv);
-  const char *pDLLName = "vvis_dll_optix.dll";
+  const char *pDLLName = "vvis_optix_dll.dll";
 
   CSysModule *pModule = Sys_LoadModule(pDLLName);
   if (!pModule) {

@@ -3,7 +3,7 @@ $MOD_DIR = "E:\Steam\steamapps\common\Source SDK Base 2013 Multiplayer\sourcetes
 $BSP_PATH = Resolve-Path "game\bin\x64\bsp_unit_tests\cpu\validation_harder.bsp"
 
 if (-not (Test-Path $BSP_PATH)) {
-    Write-Error "BSP not found! Run 'game\bin\x64\run_tests.ps1 -TestNames harder' once to generate it."
+    Write-Error "BSP not found! Run 'game\bin\x64\run_vvis_tests.ps1 -TestNames harder' once to generate it."
     exit 1
 }
 

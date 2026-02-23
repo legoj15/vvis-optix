@@ -7,7 +7,7 @@
 $Macro SRCDIR		"..\.."
 $Macro OPTIX_PATH	"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.1.0"
 $Macro OUTBINDIR	"$SRCDIR\..\game\bin"
-$Macro OUTBINNAME	"vvis_dll_optix"
+$Macro OUTBINNAME	"vvis_optix_dll"
 
 $Include "$SRCDIR\vpc_scripts\source_dll_base.vpc"
 

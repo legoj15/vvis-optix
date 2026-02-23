@@ -213,17 +213,6 @@ void FreeEdgeshare() {
 
 Vector face_centroids[MAX_MAP_FACES]; // indexed by face number, not edge
 
-// OrigFace interpolation data for fixing triangle shadow artifacts.
-// When VBSP splits a brush face along BSP, each sub-face gets its own
-// centroid.  GetPhongNormal() uses a fan-from-centroid interpolation,
-// so different centroids create normal discontinuities at split edges.
-// These tables let GetPhongNormal use the original (pre-split) face's
-// complete vertex fan instead, guaranteeing continuity.
-static Vector g_OrigFaceCentroids[MAX_MAP_FACES]; // per-origFace centroid
-static bool g_bOrigFaceValid[MAX_MAP_FACES];      // true if centroid computed
-static Vector
-    *g_OrigFaceEdgeNormals[MAX_MAP_FACES]; // per-origFace edge normals
-
 int vertexref[MAX_MAP_VERTS];
 int *vertexface[MAX_MAP_VERTS];
 faceneighbor_t faceneighbor[MAX_MAP_FACES];
@@ -447,89 +436,6 @@ void PairEdges(void) {
       VectorNormalize(fn->normal[j]);
     }
   }
-}
-
-//-----------------------------------------------------------------------------
-// BuildOrigFaceInterpData
-//
-// Called after PairEdges().  Builds two tables:
-//  1) g_OrigFaceEdgeNormals[] — per-origFace per-edge smoothed normals
-//     sourced from BSP sub-faces sharing the same origFace index.
-//     This avoids the global per-vertex ambiguity at smoothing boundaries.
-//  2) g_OrigFaceCentroids[] — centroid of each dorigfaces[] winding
-//
-// GetPhongNormal() then uses these to interpolate across the original
-// face's full vertex fan instead of each BSP-split sub-face's fan,
-// eliminating the C0 discontinuity at split edges.
-//-----------------------------------------------------------------------------
-void BuildOrigFaceInterpData(void) {
-  // Step 1: Allocate per-origFace edge normal arrays
-  memset(g_OrigFaceEdgeNormals, 0, sizeof(g_OrigFaceEdgeNormals));
-  memset(g_bOrigFaceValid, 0, sizeof(g_bOrigFaceValid));
-
-  for (int orig = 0; orig < numorigfaces; orig++) {
-    int numEdges = dorigfaces[orig].numedges;
-    if (numEdges > 0) {
-      g_OrigFaceEdgeNormals[orig] = (Vector *)calloc(numEdges, sizeof(Vector));
-    }
-  }
-
-  // Step 2: For each BSP face, match its vertex normals to its origFace's
-  // edges.  Only normals from sub-faces of the SAME origFace are used,
-  // preventing smoothing context leakage across geometry boundaries.
-  for (int i = 0; i < numfaces; i++) {
-    int orig = g_pFaces[i].origFace;
-    if (orig < 0 || orig >= numorigfaces)
-      continue;
-    if (!g_OrigFaceEdgeNormals[orig])
-      continue;
-
-    faceneighbor_t *fn = &faceneighbor[i];
-    if (!fn->normal)
-      continue;
-
-    dface_t *origFace = &dorigfaces[orig];
-
-    // Match BSP face vertices to origFace edges
-    for (int j = 0; j < g_pFaces[i].numedges; j++) {
-      int bspVert = EdgeVertex(&g_pFaces[i], j);
-
-      for (int k = 0; k < origFace->numedges; k++) {
-        int origVert = EdgeVertex(origFace, k);
-        if (origVert == bspVert) {
-          // Use this sub-face's normal (correct smoothing context)
-          VectorCopy(fn->normal[j], g_OrigFaceEdgeNormals[orig][k]);
-          break;
-        }
-      }
-    }
-  }
-
-  // Step 3: Compute origFace centroids.  face_offset is needed for bmodels.
-  for (int i = 0; i < numfaces; i++) {
-    int orig = g_pFaces[i].origFace;
-    if (orig < 0 || orig >= numorigfaces)
-      continue;
-    if (g_bOrigFaceValid[orig])
-      continue;
-
-    winding_t *w = WindingFromFace(&dorigfaces[orig], face_offset[i]);
-    if (w) {
-      Vector centroid;
-      WindingCenter(w, centroid);
-      // face_centroids[] stores positions WITHOUT face_offset
-      VectorSubtract(centroid, face_offset[i], g_OrigFaceCentroids[orig]);
-      g_bOrigFaceValid[orig] = true;
-      FreeWinding(w);
-    }
-  }
-
-  int validCount = 0;
-  for (int i = 0; i < numorigfaces; i++) {
-    if (g_bOrigFaceValid[i])
-      validCount++;
-  }
-  Msg("%d origFaces prepared for smooth interpolation\n", validCount);
 }
 
 void SaveVertexNormals(void) {
@@ -2411,60 +2317,47 @@ void GetPhongNormal(int facenum, Vector const &spot, Vector &phongnormal) {
   if (smoothing_threshold != 1) {
     faceneighbor_t *fn = &faceneighbor[facenum];
 
-    // Determine whether to use the original (pre-BSP-split) face's vertex
-    // fan for interpolation.  Using the origFace fan ensures all sub-faces
-    // from the same brush face share the same interpolation geometry,
-    // eliminating normal discontinuities at BSP split edges.
-    int origIdx = f->origFace;
-    bool useOrigFace =
-        (origIdx >= 0 && origIdx < numorigfaces && g_bOrigFaceValid[origIdx]);
-    dface_t *interpFace = useOrigFace ? &dorigfaces[origIdx] : f;
-    Vector &centroid =
-        useOrigFace ? g_OrigFaceCentroids[origIdx] : face_centroids[facenum];
+    // Calculate modified point normal for surface
+    // Use the edge normals iff they are defined.  Bend the surface towards the
+    // edge normal(s) Crude first attempt: find nearest edge normal and do a
+    // simple interpolation with facenormal. Second attempt: find edge
+    // points+center that bound the point and do a three-point
+    // triangulation(baricentric) Better third attempt: generate the point
+    // normals for all vertices and do baricentric triangulation.
 
-    for (j = 0; j < interpFace->numedges; j++) {
+    for (j = 0; j < f->numedges; j++) {
       Vector v1, v2;
+      // int e = dsurfedges[f->firstedge + j];
+      // int e1 = dsurfedges[f->firstedge + ((j+f->numedges-1)%f->numedges)];
+      // int e2 = dsurfedges[f->firstedge + ((j+1)%f->numedges)];
+
+      // edgeshare_t	*es = &edgeshare[abs(e)];
+      // edgeshare_t	*es1 = &edgeshare[abs(e1)];
+      // edgeshare_t	*es2 = &edgeshare[abs(e2)];
+      //  dface_t	*f2;
       float a1, a2, aa, bb, ab;
       int vert1, vert2;
 
-      vert1 = EdgeVertex(interpFace, j);
-      vert2 = EdgeVertex(interpFace, j + 1);
+      Vector &n1 = fn->normal[j];
+      Vector &n2 = fn->normal[(j + 1) % f->numedges];
 
-      // Get vertex normals — from per-origFace edge table when using
-      // origFace (correct smoothing context), from per-face faceneighbor
-      // otherwise.
-      Vector n1, n2;
-      if (useOrigFace && g_OrigFaceEdgeNormals[origIdx]) {
-        n1 = g_OrigFaceEdgeNormals[origIdx][j];
-        int j2 = (j + 1) % interpFace->numedges;
-        n2 = g_OrigFaceEdgeNormals[origIdx][j2];
-        // Fall back to face normal if the edge normal wasn't populated
-        if (VectorLength(n1) < 1.0e-10)
-          n1 = facenormal;
-        if (VectorLength(n2) < 1.0e-10)
-          n2 = facenormal;
-        // Clamp normals that deviate too far from face normal.
-        // The origFace fan has wider sectors than sub-face fans, so corner
-        // vertex normals (smoothed with perpendicular walls) would spread
-        // their influence across a much larger area, causing visible light
-        // warping.  Clamping to the face normal at corners prevents this.
-        if (DotProduct(n1, facenormal) < 0.95f)
-          n1 = facenormal;
-        if (DotProduct(n2, facenormal) < 0.95f)
-          n2 = facenormal;
-      } else {
-        n1 = fn->normal[j];
-        n2 = fn->normal[(j + 1) % f->numedges];
-      }
+      /*
+        if (VectorCompare( n1, fn->facenormal )
+        && VectorCompare( n2, fn->facenormal) )
+        continue;
+      */
+
+      vert1 = EdgeVertex(f, j);
+      vert2 = EdgeVertex(f, j + 1);
 
       Vector &p1 = dvertexes[vert1].point;
       Vector &p2 = dvertexes[vert2].point;
 
       // Build vectors from the middle of the face to the edge vertexes and the
       // sample pos.
-      VectorSubtract(p1, centroid, v1);
-      VectorSubtract(p2, centroid, v2);
-      VectorSubtract(spot, centroid, vspot);
+      VectorSubtract(p1, face_centroids[facenum], v1);
+      VectorSubtract(p2, face_centroids[facenum], v2);
+      VectorSubtract(spot, face_centroids[facenum], vspot);
       aa = DotProduct(v1, v1);
       bb = DotProduct(v2, v2);
       ab = DotProduct(v1, v2);
@@ -2489,6 +2382,24 @@ void GetPhongNormal(int facenum, Vector const &spot, Vector &phongnormal) {
         VectorAdd(phongnormal, temp, phongnormal);
         Assert(VectorLength(phongnormal) > 1.0e-20);
         VectorNormalize(phongnormal);
+
+        /*
+          if (a1 > 1 || a2 > 1 || a1 + a2 > 1)
+          {
+          Msg("\n%.2f %.2f\n", a1, a2 );
+          Msg("%.2f %.2f %.2f\n", v1[0], v1[1], v1[2] );
+          Msg("%.2f %.2f %.2f\n", v2[0], v2[1], v2[2] );
+          Msg("%.2f %.2f %.2f\n", vspot[0], vspot[1], vspot[2] );
+          exit(1);
+
+          a1 = 0;
+          }
+        */
+        /*
+          phongnormal[0] = (((j + 1) & 4) != 0) * 255;
+          phongnormal[1] = (((j + 1) & 2) != 0) * 255;
+          phongnormal[2] = (((j + 1) & 1) != 0) * 255;
+        */
         return;
       }
     }
@@ -2499,68 +2410,58 @@ void GetPhongNormal(int facenum, FourVectors const &spot,
                     FourVectors &phongnormal) {
   int j;
   dface_t *f = &g_pFaces[facenum];
+  //	dplane_t	*p = &dplanes[f->planenum];
   Vector facenormal;
   FourVectors vspot;
 
   VectorCopy(dplanes[f->planenum].normal, facenormal);
   phongnormal.DuplicateVector(facenormal);
 
+  FourVectors faceCentroid;
+  faceCentroid.DuplicateVector(face_centroids[facenum]);
+
   if (smoothing_threshold != 1) {
     faceneighbor_t *fn = &faceneighbor[facenum];
 
-    // Use origFace fan for BSP-split faces (same logic as scalar variant)
-    int origIdx = f->origFace;
-    bool useOrigFace =
-        (origIdx >= 0 && origIdx < numorigfaces && g_bOrigFaceValid[origIdx]);
-    dface_t *interpFace = useOrigFace ? &dorigfaces[origIdx] : f;
-    Vector centroidVec =
-        useOrigFace ? g_OrigFaceCentroids[origIdx] : face_centroids[facenum];
-    FourVectors faceCentroid;
-    faceCentroid.DuplicateVector(centroidVec);
+    // Calculate modified point normal for surface
+    // Use the edge normals iff they are defined.  Bend the surface towards the
+    // edge normal(s) Crude first attempt: find nearest edge normal and do a
+    // simple interpolation with facenormal. Second attempt: find edge
+    // points+center that bound the point and do a three-point
+    // triangulation(baricentric) Better third attempt: generate the point
+    // normals for all vertices and do baricentric triangulation.
 
-    for (j = 0; j < interpFace->numedges; ++j) {
+    for (j = 0; j < f->numedges; ++j) {
       Vector v1, v2;
       fltx4 a1, a2;
       float aa, bb, ab;
       int vert1, vert2;
 
-      vert1 = EdgeVertex(interpFace, j);
-      vert2 = EdgeVertex(interpFace, j + 1);
+      Vector &n1 = fn->normal[j];
+      Vector &n2 = fn->normal[(j + 1) % f->numedges];
 
-      // Get vertex normals
-      Vector n1, n2;
-      if (useOrigFace && g_OrigFaceEdgeNormals[origIdx]) {
-        n1 = g_OrigFaceEdgeNormals[origIdx][j];
-        int j2 = (j + 1) % interpFace->numedges;
-        n2 = g_OrigFaceEdgeNormals[origIdx][j2];
-        if (VectorLength(n1) < 1.0e-10)
-          n1 = facenormal;
-        if (VectorLength(n2) < 1.0e-10)
-          n2 = facenormal;
-        // Clamp corner normals (see scalar variant comment)
-        if (DotProduct(n1, facenormal) < 0.95f)
-          n1 = facenormal;
-        if (DotProduct(n2, facenormal) < 0.95f)
-          n2 = facenormal;
-      } else {
-        n1 = fn->normal[j];
-        n2 = fn->normal[(j + 1) % f->numedges];
-      }
+      vert1 = EdgeVertex(f, j);
+      vert2 = EdgeVertex(f, j + 1);
 
       Vector &p1 = dvertexes[vert1].point;
       Vector &p2 = dvertexes[vert2].point;
 
-      // Build vectors from the centroid to edge vertexes and sample pos.
-      VectorSubtract(p1, centroidVec, v1);
-      VectorSubtract(p2, centroidVec, v2);
+      // Build vectors from the middle of the face to the edge vertexes and the
+      // sample pos.
+      VectorSubtract(p1, face_centroids[facenum], v1);
+      VectorSubtract(p2, face_centroids[facenum], v2);
+      // VectorSubtract( spot, face_centroids[facenum], vspot );
       vspot = spot;
       vspot -= faceCentroid;
       aa = DotProduct(v1, v1);
       bb = DotProduct(v2, v2);
       ab = DotProduct(v1, v2);
+      // a1 = (bb * DotProduct( v1, vspot ) - ab * DotProduct( vspot, v2 )) /
+      // (aa * bb - ab * ab);
       a1 = ReciprocalSIMD(ReplicateX4(aa * bb - ab * ab));
       a1 = MulSIMD(a1, SubSIMD(MulSIMD(ReplicateX4(bb), vspot * v1),
                                MulSIMD(ReplicateX4(ab), vspot * v2)));
+      // a2 = (DotProduct( vspot, v2 ) - a1 * ab) / bb;
       a2 = ReciprocalSIMD(ReplicateX4(bb));
       a2 = MulSIMD(a2, SubSIMD(vspot * v2, MulSIMD(a1, ReplicateX4(ab))));
 
