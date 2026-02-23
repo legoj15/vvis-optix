@@ -361,6 +361,7 @@ extern qboolean dumpcollide;
 extern qboolean nodetailcuts;
 extern qboolean g_DumpStaticProps;
 extern qboolean g_bAllowDynamicPropsAsStatic;
+extern qboolean g_bForceDynamicPropsAsStatic;
 extern qboolean g_bSkyVis;
 extern vec_t microvolume;
 extern bool g_snapAxialPlanes;

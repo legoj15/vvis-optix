@@ -23,7 +23,6 @@
 #include "vbsp.h"
 #include <float.h>
 
-
 static void SetCurrentModel(studiohdr_t *pStudioHdr);
 static void FreeCurrentModelVertexes();
 
@@ -95,8 +94,15 @@ enum isstaticprop_ret {
 };
 
 isstaticprop_ret IsStaticProp(studiohdr_t *pHdr) {
-  if (!(pHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP))
-    return RET_FAIL_NOT_MARKED_STATIC_PROP;
+  if (!(pHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP)) {
+    if (g_bForceDynamicPropsAsStatic) {
+      Warning("Warning: Forcing non-$staticprop model \"%s\" as static prop, "
+              "collision and rendering may be incorrect.\n",
+              pHdr->pszName());
+    } else {
+      return RET_FAIL_NOT_MARKED_STATIC_PROP;
+    }
+  }
 
   if (g_bAllowDynamicPropsAsStatic)
     return RET_VALID;
