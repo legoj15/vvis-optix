@@ -48,6 +48,7 @@ qboolean verboseentities;
 qboolean dumpcollide = false;
 qboolean g_bLowPriority = false;
 qboolean g_DumpStaticProps = false;
+qboolean g_bAllowDynamicPropsAsStatic = false;
 qboolean g_bSkyVis =
     false; // skybox vis is off by default, toggle this to enable it
 qboolean g_bCountVertsOnly = false; // count vertices only, skip BSP file write
@@ -998,6 +999,9 @@ int RunVBSP(int argc, char **argv) {
     } else if (!Q_stricmp(argv[i], "-dumpstaticprop")) {
       Msg("Dumping static props to staticpropXXX.txt\n");
       g_DumpStaticProps = true;
+    } else if (!Q_stricmp(argv[i], "-allowdynamicpropsasstatic")) {
+      Msg("Allowing dynamic props to be used as static props\n");
+      g_bAllowDynamicPropsAsStatic = true;
     } else if (!Q_stricmp(argv[i], "-forceskyvis")) {
       Msg("Enabled vis in 3d skybox\n");
       g_bSkyVis = true;
@@ -1158,6 +1162,9 @@ int RunVBSP(int argc, char **argv) {
           "  -blocks # # # # : Enter the mins and maxs for the grid size vbsp "
           "uses.\n"
           "  -dumpstaticprops: Dump static props to staticprop*.txt\n"
+          "  -allowdynamicpropsasstatic: Allow all models with the 'static' flag in the\n"
+          "                              model viewer to be used on prop_static, even when\n"
+          "                              their propdata doesn't contain 'allowstatic'.\n"
           "  -dumpcollide    : Write files with collision info.\n"
           "  -forceskyvis	   : Enable vis calculations in 3d skybox "
           "leaves\n"

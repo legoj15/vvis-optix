@@ -19,7 +19,6 @@
 #include "threads.h"
 #include "utilmatlib.h"
 
-
 #ifdef WIN32
 #pragma warning(disable : 4706)
 #endif
@@ -361,6 +360,7 @@ extern qboolean noopt;
 extern qboolean dumpcollide;
 extern qboolean nodetailcuts;
 extern qboolean g_DumpStaticProps;
+extern qboolean g_bAllowDynamicPropsAsStatic;
 extern qboolean g_bSkyVis;
 extern vec_t microvolume;
 extern bool g_snapAxialPlanes;
