@@ -19,6 +19,7 @@
 #include "gamebspfile.h"
 #include "phyfile.h"
 #include "tier1/strtools.h"
+#include "utldict.h"
 #include "utlsymbol.h"
 #include "utlvector.h"
 #include "vbsp.h"
@@ -73,6 +74,11 @@ static bool ModelLess(ModelCollisionLookup_t const &src1,
 static CUtlRBTree<ModelCollisionLookup_t, unsigned short>
     s_ModelCollisionCache(0, 32, ModelLess);
 static CUtlVector<int> s_LightingInfo;
+
+// Maps original model name -> patched model name for
+// -forcedynamicpropsasstatic. The patched model lives under maps/<mapname>/
+// with a _static suffix, mirroring how WVT/cubemap patches work.
+static CUtlDict<const char *, int> s_PatchedModelNames;
 
 //-----------------------------------------------------------------------------
 // Gets the keyvalues from a studiohdr
@@ -831,9 +837,16 @@ static bool CompileWithStudiomdl(const char *pQcAbsPath) {
 // Embeds a recompiled or patched model into the BSP pakfile.
 // Tries full decompile-recompile first; falls back to flag-patching + VVD
 // rotation for simple cases.
+//
+// On full-recompile success, writes the new model path (with maps/<mapname>/
+// prefix and _static suffix) into pPatchedNameOut and returns true.
+// On fallback or failure, returns false.
 //-----------------------------------------------------------------------------
-static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
-                                   studiohdr_t *pStudioHdr) {
+static bool EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
+                                   studiohdr_t *pStudioHdr,
+                                   char *pPatchedNameOut, int nPatchedNameMax) {
+  pPatchedNameOut[0] = '\0';
+
   // Try the full decompile-recompile pipeline first
   char vtxPath[1024], vvdPath[1024];
   V_strncpy(vtxPath, pModelName, sizeof(vtxPath));
@@ -862,16 +875,51 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
     V_snprintf(tempQc, sizeof(tempQc), "%s%c%s.qc", tempDir,
                CORRECT_PATH_SEPARATOR, modelBaseName);
 
-    // $modelname: strip "models/" prefix from pModelName
-    // pModelName = "models/props_c17/door02_double.mdl"
-    // autoModelName = "props_c17/door02_double.mdl"
+    // Strip "models/" prefix from pModelName to get the relative path
+    // e.g. pModelName = "models/props_combine/Cell_01_pod_cheap.mdl"
+    //      pRelative  = "props_combine/Cell_01_pod_cheap.mdl"
     const char *pRelative = pModelName;
     if (V_strnicmp(pRelative, "models/", 7) == 0 ||
         V_strnicmp(pRelative, "models\\", 7) == 0)
       pRelative += 7;
-    V_strncpy(autoModelName, pRelative, sizeof(autoModelName));
+
+    // Build the patched $modelname for the QC:
+    //   maps/<mapbase>/<reldir>/<basename>_static.mdl
+    // This mirrors the WVT/cubemap patch naming convention.
+    char modelRelDir[256];
+    V_strncpy(modelRelDir, pRelative, sizeof(modelRelDir));
+    V_StripFilename(modelRelDir);
+
+    // Try the full maps/<mapbase>/ path first
+    if (modelRelDir[0]) {
+      V_snprintf(autoModelName, sizeof(autoModelName),
+                 "maps/%s/%s/%s_static.mdl", mapbase, modelRelDir,
+                 modelBaseName);
+    } else {
+      V_snprintf(autoModelName, sizeof(autoModelName), "maps/%s/%s_static.mdl",
+                 mapbase, modelBaseName);
+    }
+
+    // Check if the full pakfile path fits within DETAIL_NAME_LENGTH.
+    // The dict lump stores "models/<autoModelName>".
+    char testPakPath[512];
+    V_snprintf(testPakPath, sizeof(testPakPath), "models/%s", autoModelName);
+
+    if (V_strlen(testPakPath) >= DETAIL_NAME_LENGTH) {
+      // Fallback: keep original directory but append _static to basename
+      Warning("  Patched model path too long (%d >= %d), using short path\n",
+              V_strlen(testPakPath), DETAIL_NAME_LENGTH);
+      if (modelRelDir[0]) {
+        V_snprintf(autoModelName, sizeof(autoModelName), "%s/%s_static.mdl",
+                   modelRelDir, modelBaseName);
+      } else {
+        V_snprintf(autoModelName, sizeof(autoModelName), "%s_static.mdl",
+                   modelBaseName);
+      }
+    }
 
     Msg("  Decompiling model to SMD: %s\n", tempSmd);
+    Msg("  Patched model name: models/%s\n", autoModelName);
 
     if (WriteSMDFromModel(tempSmd, pStudioHdr, vvdBuf, vtxBuf)) {
       // Try to decompile original PHY into a physics SMD
@@ -885,45 +933,51 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
         pPhySmdPath = tempPhySmd;
       }
 
-      // Generate QC
+      // Generate QC with the patched $modelname
       if (GenerateStaticPropQC(tempQc, autoModelName, tempSmd, pPhySmdPath,
                                bIsCollisionJoints, pStudioHdr)) {
         Msg("  Generated QC: %s\n", tempQc);
 
         // Compile with studiomdl
         if (CompileWithStudiomdl(tempQc)) {
-          // studiomdl outputs to gamedir/models/<autoModelName without .mdl>/
+          // studiomdl outputs to gamedir/models/<autoModelName dirs>/
+          // We need to find the compiled files there.
           char compiledModelDir[MAX_PATH];
           V_snprintf(compiledModelDir, sizeof(compiledModelDir), "%smodels%c",
                      gamedir, CORRECT_PATH_SEPARATOR);
 
-          // Get directory portion of the model name for the compiled path
-          char modelRelDir[256];
-          V_strncpy(modelRelDir, pRelative, sizeof(modelRelDir));
-          V_StripFilename(modelRelDir);
-          if (modelRelDir[0]) {
-            V_strncat(compiledModelDir, modelRelDir, sizeof(compiledModelDir));
+          // Get directory portion of autoModelName for the compiled path
+          char autoRelDir[256];
+          V_strncpy(autoRelDir, autoModelName, sizeof(autoRelDir));
+          V_StripFilename(autoRelDir);
+          if (autoRelDir[0]) {
+            V_strncat(compiledModelDir, autoRelDir, sizeof(compiledModelDir));
             V_AppendSlash(compiledModelDir, sizeof(compiledModelDir));
           }
 
-          char compiledMdl[MAX_PATH];
-          V_snprintf(compiledMdl, sizeof(compiledMdl), "%s%s.mdl",
-                     compiledModelDir, modelBaseName);
+          // The compiled basename has _static appended
+          char compiledBaseName[256];
+          V_snprintf(compiledBaseName, sizeof(compiledBaseName), "%s_static",
+                     modelBaseName);
 
-          // Embed recompiled files under the ORIGINAL model name so the
-          // pakfile overrides the disk version. The prop lump references the
-          // original path, so we must use that same path.
+          // Build the patched pakfile path: models/<autoModelName>
+          char patchedPakBase[512];
+          V_snprintf(patchedPakBase, sizeof(patchedPakBase), "models/%s",
+                     autoModelName);
+
+          // Embed recompiled files under the PATCHED model name so the
+          // original dynamic model on disk is NOT overwritten.
           const char *exts[] = {".mdl", ".vvd", ".dx90.vtx", ".phy"};
           bool bSuccess = true;
 
           for (int e = 0; e < 4; ++e) {
             char compiledPath[MAX_PATH];
             V_snprintf(compiledPath, sizeof(compiledPath), "%s%s%s",
-                       compiledModelDir, modelBaseName, exts[e]);
+                       compiledModelDir, compiledBaseName, exts[e]);
 
-            // Embed under original model path
+            // Embed under patched model path
             char pakPath[512];
-            V_strncpy(pakPath, pModelName, sizeof(pakPath));
+            V_strncpy(pakPath, patchedPakBase, sizeof(pakPath));
             V_SetExtension(pakPath, exts[e], sizeof(pakPath));
 
             CUtlBuffer fileBuf;
@@ -941,6 +995,10 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
 
           if (bSuccess) {
             Msg("  Successfully recompiled model as $staticprop\n");
+            Msg("  Patched model path: %s\n", patchedPakBase);
+
+            // Write the patched model path back to caller
+            V_strncpy(pPatchedNameOut, patchedPakBase, nPatchedNameMax);
 
             // Clean up compiled model files from gamedir
             // DISABLED FOR DEBUGGING — keep all temp files for inspection
@@ -950,7 +1008,7 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
             for (int e = 0; e < 5; ++e) {
               char compiledPath[MAX_PATH];
               V_snprintf(compiledPath, sizeof(compiledPath), "%s%s%s",
-                         compiledModelDir, modelBaseName, cleanExts[e]);
+                         compiledModelDir, compiledBaseName, cleanExts[e]);
               remove(compiledPath);
             }
 
@@ -960,7 +1018,7 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
             remove(tempPhySmd);
             */
 
-            return;
+            return true;
           }
         }
       }
@@ -971,6 +1029,7 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
     remove(tempQc);
 
     Warning("  Decompile-recompile failed, falling back to flag-patching\n");
+    return false;
   }
 
   // Fallback: flag-patching + VVD rotation (works for simple 1-bone models)
@@ -1027,6 +1086,8 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
                    vvdBuf.TellMaxPut(), false);
     Msg("  [Fallback] Embedded modified VVD\n");
   }
+
+  return false;
 }
 
 static CPhysCollide *GetCollisionModel(char const *pModelName) {
@@ -1065,9 +1126,20 @@ static CPhysCollide *GetCollisionModel(char const *pModelName) {
 
   // If this model was forced as a static prop and doesn't have the flag,
   // patch it and embed the modified model in the BSP pakfile.
+  // On success, register the patched model name so the static prop
+  // dictionary lump references the new path instead of the original.
   if (g_bForceDynamicPropsAsStatic &&
       !(pStudioHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP)) {
-    EmbedPatchedModelInPak(pModelName, buf, pStudioHdr);
+    char patchedName[512];
+    if (EmbedPatchedModelInPak(pModelName, buf, pStudioHdr, patchedName,
+                               sizeof(patchedName)) &&
+        patchedName[0]) {
+      // Store mapping: original -> patched, for AddStaticPropToLump
+      char *pStored = new char[V_strlen(patchedName) + 1];
+      V_strcpy(pStored, patchedName);
+      s_PatchedModelNames.Insert(pModelName, pStored);
+      Msg("  Registered patched model: %s -> %s\n", pModelName, pStored);
+    }
   }
 
   // necessary for vertex access
@@ -1268,7 +1340,18 @@ static void AddStaticPropToLump(StaticPropBuild_t const &build) {
   // Insert an element into the lump data...
   int i = s_StaticPropLump.AddToTail();
   StaticPropLump_t &propLump = s_StaticPropLump[i];
-  propLump.m_PropType = AddStaticPropDictLump(build.m_pModelName);
+
+  // If this model was recompiled with -forcedynamicpropsasstatic, the patched
+  // version lives under maps/<mapname>/ with a _static suffix.  We must
+  // reference the patched path in the dict lump so the engine loads the
+  // correct (static) version from the pakfile.
+  const char *pDictModelName = build.m_pModelName;
+  int iPatch = s_PatchedModelNames.Find(build.m_pModelName);
+  if (iPatch != s_PatchedModelNames.InvalidIndex()) {
+    pDictModelName = s_PatchedModelNames[iPatch];
+    Msg("  Using patched model in dict: %s\n", pDictModelName);
+  }
+  propLump.m_PropType = AddStaticPropDictLump(pDictModelName);
   VectorCopy(build.m_Origin, propLump.m_Origin);
   VectorCopy(build.m_Angles, propLump.m_Angles);
   propLump.m_FirstLeaf = s_StaticPropLeafLump.Count();
