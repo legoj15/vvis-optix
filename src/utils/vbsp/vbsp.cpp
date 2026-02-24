@@ -50,6 +50,7 @@ qboolean g_bLowPriority = false;
 qboolean g_DumpStaticProps = false;
 qboolean g_bAllowDynamicPropsAsStatic = false;
 qboolean g_bForceDynamicPropsAsStatic = false;
+char g_szBinRoot[MAX_PATH] = "";
 qboolean g_bSkyVis =
     false; // skybox vis is off by default, toggle this to enable it
 qboolean g_bCountVertsOnly = false; // count vertices only, skip BSP file write
@@ -1045,9 +1046,14 @@ int RunVBSP(int argc, char **argv) {
       // nothing to do here, but don't bail on this option
     } else if (!Q_stricmp(argv[i], "-vproject") ||
                !Q_stricmp(argv[i], "-game") ||
-               !Q_stricmp(argv[i], "-insert_search_path") ||
-               !Q_stricmp(argv[i], "-binroot")) {
+               !Q_stricmp(argv[i], "-insert_search_path")) {
       ++i;
+    } else if (!Q_stricmp(argv[i], "-binroot")) {
+      ++i;
+      if (i < argc) {
+        V_strncpy(g_szBinRoot, argv[i], sizeof(g_szBinRoot));
+        V_StripTrailingSlash(g_szBinRoot);
+      }
     } else if (!Q_stricmp(argv[i], "-keepstalezip")) {
       g_bKeepStaleZip = true;
     } else if (!Q_stricmp(argv[i], "-xbox")) {
