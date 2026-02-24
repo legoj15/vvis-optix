@@ -422,7 +422,8 @@ static bool WriteSMDFromModel(const char *pSmdPath, studiohdr_t *pStudioHdr,
 // Generates a minimal QC file for studiomdl with $staticprop.
 //-----------------------------------------------------------------------------
 static bool GenerateStaticPropQC(const char *pQcPath, const char *pModelName,
-                                 const char *pSmdPath,
+                                 const char *pSmdPath, const char *pPhySmdPath,
+                                 bool bIsCollisionJoints,
                                  studiohdr_t *pStudioHdr) {
   FILE *fp = fopen(pQcPath, "w");
   if (!fp)
@@ -443,15 +444,313 @@ static bool GenerateStaticPropQC(const char *pQcPath, const char *pModelName,
   // $sequence
   fprintf(fp, "$sequence \"idle\" \"%s\" fps 30\n", pSmdPath);
 
-  // $collisionmodel — use the same SMD so physics matches visual mesh
-  // and gets the same $staticprop coordinate conversion
-  fprintf(fp, "$collisionmodel \"%s\" {\n", pSmdPath);
-  fprintf(fp, "  $concave\n");
-  fprintf(fp, "  $maxconvexpieces 2048\n");
-  fprintf(fp, "}\n");
+  // Always use $collisionmodel with $concave for $staticprop recompilation
+  if (pPhySmdPath) {
+    fprintf(fp, "$collisionmodel \"%s\" {\n", pPhySmdPath);
+    fprintf(fp, "  $concave\n");
+    fprintf(fp, "  $maxconvexpieces 2048\n");
+    fprintf(fp, "}\n");
+  }
 
   fclose(fp);
   return true;
+}
+
+//-----------------------------------------------------------------------------
+// Decompile a PHY file into SMD format using IPhysicsCollision::CreateDebugMesh
+// to extract triangle vertices from the collision model.
+//-----------------------------------------------------------------------------
+static bool DecompilePhyToSmd(const char *pModelName, const char *pSmdPath,
+                              studiohdr_t *pStudioHdr,
+                              bool *pOutIsCollisionJoints) {
+  if (pOutIsCollisionJoints)
+    *pOutIsCollisionJoints = false;
+  if (!s_pPhysCollision)
+    return false;
+
+  // Read the original PHY file
+  char phyPath[512];
+  V_strncpy(phyPath, pModelName, sizeof(phyPath));
+  V_SetExtension(phyPath, ".phy", sizeof(phyPath));
+
+  CUtlBuffer phyBuf;
+  if (!g_pFullFileSystem->ReadFile(phyPath, NULL, phyBuf))
+    return false;
+
+  int phyLen = phyBuf.TellMaxPut();
+  if (phyLen < (int)sizeof(phyheader_t))
+    return false;
+
+  phyheader_t *pPhyHdr = (phyheader_t *)phyBuf.Base();
+  if (pPhyHdr->solidCount <= 0)
+    return false;
+
+  // Get the collision data (after the header)
+  const char *pSolidData = (const char *)phyBuf.Base() + pPhyHdr->size;
+  int dataSize = phyLen - pPhyHdr->size;
+
+  if (dataSize <= 0)
+    return false;
+
+  // Load collision data via VCollideLoad
+  vcollide_t collide;
+  memset(&collide, 0, sizeof(collide));
+  s_pPhysCollision->VCollideLoad(&collide, pPhyHdr->solidCount, pSolidData,
+                                 dataSize, false);
+
+  if (collide.solidCount <= 0)
+    return false;
+
+  FILE *fp = fopen(pSmdPath, "w");
+  if (!fp) {
+    s_pPhysCollision->VCollideUnload(&collide);
+    return false;
+  }
+
+  // Pre-count total convex pieces to know how many bones we need
+  int totalConvexPieces = 0;
+  for (int s = 0; s < collide.solidCount; ++s) {
+    if (!collide.solids[s])
+      continue;
+    ICollisionQuery *pQuery =
+        s_pPhysCollision->CreateQueryModel(collide.solids[s]);
+    if (pQuery) {
+      totalConvexPieces += pQuery->ConvexCount();
+      s_pPhysCollision->DestroyQueryModel(pQuery);
+    }
+  }
+
+  if (totalConvexPieces <= 0) {
+    fclose(fp);
+    s_pPhysCollision->VCollideUnload(&collide);
+    return false;
+  }
+
+  // Apply poseToBone^-1 (= boneToPose) to ALL physics vertices.
+  //
+  // $collisionjoints: ICollisionQuery returns bone-local HL vertices.
+  //   poseToBone^-1 converts them to model space.  Studiomdl then applies
+  //   the new $staticprop bone's poseToBone, placing them correctly.
+  //
+  // $collisionmodel + $staticprop: ICollisionQuery returns model-space HL
+  //   vertices.  poseToBone^-1 pre-rotates them to match the $staticprop
+  //   visual rotation.  Studiomdl's boneToWorld * poseToBone = identity
+  //   preserves this pre-rotation, so collision matches the rotated mesh.
+
+  bool bIsCollisionJoints = (collide.solidCount > 1); // multi-solid = always
+  if (bIsCollisionJoints && pOutIsCollisionJoints)
+    *pOutIsCollisionJoints = true;
+  if (!bIsCollisionJoints && collide.solidCount == 1 && collide.pKeyValues &&
+      pStudioHdr) {
+    // Parse first solid name from PHY keyvalues.
+    // Format: solid { "index" "0" "name" "solid_name" ... }
+    const char *pName = strstr(collide.pKeyValues, "\"name\"");
+    if (pName) {
+      // Skip past "name" and whitespace to the value
+      pName += 6; // skip "name"
+      while (*pName && (*pName == ' ' || *pName == '\t' || *pName == '"'))
+        pName++;
+      // Extract the value (until closing quote)
+      char solidName[256];
+      int i = 0;
+      while (*pName && *pName != '"' && i < 255)
+        solidName[i++] = *pName++;
+      solidName[i] = '\0';
+
+      // Check if this name matches any bone in the model
+      for (int b = 0; b < pStudioHdr->numbones; ++b) {
+        if (V_stricmp(solidName, pStudioHdr->pBone(b)->pszName()) == 0) {
+          bIsCollisionJoints = true;
+          if (pOutIsCollisionJoints)
+            *pOutIsCollisionJoints = true;
+          Msg("  PHY solid name \"%s\" matches bone %d — using "
+              "$collisionjoints path\n",
+              solidName, b);
+          break;
+        }
+      }
+    }
+  }
+
+  // Build per-solid poseToBone matrices.
+  //
+  // For $collisionjoints each solid maps to a DIFFERENT bone — we must
+  // use THAT bone's poseToBone, not just bone 0.  The PHY keyvalues
+  // contain entries like:  solid { "index" "0" "name" "bone_name" ... }
+  //
+  // For $collisionmodel (single solid), we still use bone 0.
+  const int MAX_SOLIDS = 128;
+  matrix3x4_t solidPoseToBone[MAX_SOLIDS];
+  int solidBoneIndex[MAX_SOLIDS];
+  for (int s = 0; s < MAX_SOLIDS; ++s) {
+    SetIdentityMatrix(solidPoseToBone[s]);
+    solidBoneIndex[s] = 0;
+  }
+
+  if (bIsCollisionJoints && collide.pKeyValues && pStudioHdr) {
+    // Parse each "solid" block to find solid index → bone name mapping.
+    const char *pCur = collide.pKeyValues;
+    while ((pCur = strstr(pCur, "\"index\"")) != NULL) {
+      // Extract index value
+      pCur += 7; // skip "index"
+      while (*pCur && (*pCur == ' ' || *pCur == '\t' || *pCur == '"'))
+        pCur++;
+      int solidIdx = atoi(pCur);
+
+      // Find the "name" field after this index
+      const char *pName = strstr(pCur, "\"name\"");
+      if (!pName)
+        break;
+      pName += 6; // skip "name"
+      while (*pName && (*pName == ' ' || *pName == '\t' || *pName == '"'))
+        pName++;
+      char boneName[256];
+      int i = 0;
+      while (*pName && *pName != '"' && i < 255)
+        boneName[i++] = *pName++;
+      boneName[i] = '\0';
+
+      // Find matching bone in the studiohdr
+      if (solidIdx >= 0 && solidIdx < MAX_SOLIDS &&
+          solidIdx < collide.solidCount) {
+        for (int b = 0; b < pStudioHdr->numbones; ++b) {
+          if (V_stricmp(boneName, pStudioHdr->pBone(b)->pszName()) == 0) {
+            MatrixCopy(pStudioHdr->pBone(b)->poseToBone,
+                       solidPoseToBone[solidIdx]);
+            solidBoneIndex[solidIdx] = b;
+            Msg("    Solid %d → bone %d (\"%s\")\n", solidIdx, b, boneName);
+            break;
+          }
+        }
+      }
+      pCur = pName;
+    }
+  } else if (pStudioHdr && pStudioHdr->numbones > 0) {
+    // Single-solid $collisionmodel — use root bone's poseToBone
+    const mstudiobone_t *pBone = pStudioHdr->pBone(0);
+    for (int s = 0; s < collide.solidCount; ++s) {
+      MatrixCopy(pBone->poseToBone, solidPoseToBone[s]);
+      solidBoneIndex[s] = 0;
+    }
+  }
+
+  // Write SMD header matching reference bone hierarchy
+  fprintf(fp, "// Physics SMD decompiled by VBSP\n");
+  fprintf(fp, "version 1\n");
+  fprintf(fp, "nodes\n");
+  if (pStudioHdr && pStudioHdr->numbones > 0) {
+    for (int b = 0; b < pStudioHdr->numbones; ++b) {
+      mstudiobone_t *pBone = pStudioHdr->pBone(b);
+      fprintf(fp, "  %d \"%s\" %d\n", b, pBone->pszName(), pBone->parent);
+    }
+  } else {
+    fprintf(fp, "  0 \"phys_root\" -1\n");
+  }
+  fprintf(fp, "end\n");
+  fprintf(fp, "skeleton\n");
+  fprintf(fp, "time 0\n");
+  if (pStudioHdr && pStudioHdr->numbones > 0) {
+    for (int b = 0; b < pStudioHdr->numbones; ++b) {
+      mstudiobone_t *pBone = pStudioHdr->pBone(b);
+      fprintf(fp, "  %d  %f %f %f  %f %f %f\n", b, pBone->pos.x, pBone->pos.y,
+              pBone->pos.z, pBone->rot.x, pBone->rot.y, pBone->rot.z);
+    }
+  } else {
+    fprintf(fp,
+            "  0  0.000000 0.000000 0.000000  0.000000 0.000000 0.000000\n");
+  }
+  fprintf(fp, "end\n");
+  fprintf(fp, "triangles\n");
+
+  int totalTris = 0;
+  int totalConvex = 0;
+  for (int s = 0; s < collide.solidCount; ++s) {
+    if (!collide.solids[s])
+      continue;
+
+    // Use ICollisionQuery for exact original hull triangles
+    ICollisionQuery *pQuery =
+        s_pPhysCollision->CreateQueryModel(collide.solids[s]);
+    if (!pQuery)
+      continue;
+
+    // Use this solid's specific poseToBone matrix
+    matrix3x4_t &curPoseToBone = solidPoseToBone[s < MAX_SOLIDS ? s : 0];
+
+    int numConvex = pQuery->ConvexCount();
+    for (int c = 0; c < numConvex; ++c) {
+      int boneIdx = solidBoneIndex[s < MAX_SOLIDS ? s : 0];
+      int numTris = pQuery->TriangleCount(c);
+
+      if (numTris > 0) {
+        Vector *triVerts = new Vector[numTris * 3];
+        Vector *triNormals = new Vector[numTris * 3];
+
+        for (int t = 0; t < numTris; ++t) {
+          pQuery->GetTriangleVerts(c, t, &triVerts[t * 3]);
+
+          // Apply this solid's poseToBone^-1 to transform to model space.
+          // VectorITransform(v, poseToBone) = poseToBone^-1 * v = boneToPose *
+          // v
+          for (int v = 0; v < 3; ++v) {
+            Vector tmp;
+            VectorITransform(triVerts[t * 3 + v], curPoseToBone, tmp);
+            triVerts[t * 3 + v] = tmp;
+            triNormals[t * 3 + v].Init(); // zero out for accumulation
+          }
+        }
+
+        // Accumulate smoothed face normals
+        for (int t = 0; t < numTris; ++t) {
+          Vector &v0 = triVerts[t * 3 + 0];
+          Vector &v1 = triVerts[t * 3 + 1];
+          Vector &v2 = triVerts[t * 3 + 2];
+
+          // Compute face normal (in model space)
+          Vector e1 = v1 - v0;
+          Vector e2 = v2 - v0;
+          Vector faceNormal = CrossProduct(e1, e2);
+          VectorNormalize(faceNormal);
+
+          // Find all vertices that match position to accumulate smooth normals
+          for (int i = 0; i < numTris * 3; ++i) {
+            if (triVerts[i].DistToSqr(v0) < 1e-4f)
+              triNormals[i] += faceNormal;
+            if (triVerts[i].DistToSqr(v1) < 1e-4f)
+              triNormals[i] += faceNormal;
+            if (triVerts[i].DistToSqr(v2) < 1e-4f)
+              triNormals[i] += faceNormal;
+          }
+        }
+
+        for (int t = 0; t < numTris; ++t) {
+          fprintf(fp, "phy\n");
+          for (int v = 0; v < 3; ++v) {
+            Vector pos = triVerts[t * 3 + v];
+            Vector norm = triNormals[t * 3 + v];
+            VectorNormalize(norm);
+            fprintf(fp, "  %d %f %f %f %f %f %f 0 0\n", boneIdx, pos.x, pos.y,
+                    pos.z, norm.x, norm.y, norm.z);
+          }
+          totalTris++;
+        }
+
+        delete[] triVerts;
+        delete[] triNormals;
+      }
+      totalConvex++;
+    }
+    s_pPhysCollision->DestroyQueryModel(pQuery);
+  }
+
+  fprintf(fp, "end\n");
+  fclose(fp);
+
+  s_pPhysCollision->VCollideUnload(&collide);
+
+  Msg("  Decompiled PHY to physics SMD: %d triangles, %d convex pieces\n",
+      totalTris, totalConvex);
+  return totalTris > 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -505,7 +804,7 @@ static bool CompileWithStudiomdl(const char *pQcAbsPath) {
   char cmdline[4 * MAX_PATH];
   V_snprintf(
       cmdline, sizeof(cmdline),
-      "\"cd /d \"%s\" && \"%s\" -nop4 -quiet -nowarnings -game \"%s\" \"%s\"\"",
+      "\"cd /d \"%s\" && \"%s\" -nop4 -fullcollide -game \"%s\" \"%s\"\"",
       studiomdlDir, studiomdlExe, cleanGameDir, pQcAbsPath);
 
   Msg("  Running: %s\n", cmdline);
@@ -565,8 +864,20 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
     Msg("  Decompiling model to SMD: %s\n", tempSmd);
 
     if (WriteSMDFromModel(tempSmd, pStudioHdr, vvdBuf, vtxBuf)) {
+      // Try to decompile original PHY into a physics SMD
+      char tempPhySmd[MAX_PATH];
+      V_snprintf(tempPhySmd, sizeof(tempPhySmd), "%s%c%s_physics.smd", tempDir,
+                 CORRECT_PATH_SEPARATOR, modelBaseName);
+      const char *pPhySmdPath = NULL;
+      bool bIsCollisionJoints = false;
+      if (DecompilePhyToSmd(pModelName, tempPhySmd, pStudioHdr,
+                            &bIsCollisionJoints)) {
+        pPhySmdPath = tempPhySmd;
+      }
+
       // Generate QC
-      if (GenerateStaticPropQC(tempQc, autoModelName, tempSmd, pStudioHdr)) {
+      if (GenerateStaticPropQC(tempQc, autoModelName, tempSmd, pPhySmdPath,
+                               bIsCollisionJoints, pStudioHdr)) {
         Msg("  Generated QC: %s\n", tempQc);
 
         // Compile with studiomdl
@@ -600,8 +911,7 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
             V_snprintf(compiledPath, sizeof(compiledPath), "%s%s%s",
                        compiledModelDir, modelBaseName, exts[e]);
 
-            // Embed under original model path (e.g.
-            // models/props_c17/door02_double.mdl)
+            // Embed under original model path
             char pakPath[512];
             V_strncpy(pakPath, pModelName, sizeof(pakPath));
             V_SetExtension(pakPath, exts[e], sizeof(pakPath));
@@ -623,7 +933,8 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
             Msg("  Successfully recompiled model as $staticprop\n");
 
             // Clean up compiled model files from gamedir
-            // Include .dx80.vtx which studiomdl generates but we don't embed
+            // DISABLED FOR DEBUGGING — keep all temp files for inspection
+            /*
             const char *cleanExts[] = {".mdl", ".vvd", ".dx90.vtx", ".phy",
                                        ".dx80.vtx"};
             for (int e = 0; e < 5; ++e) {
@@ -633,9 +944,11 @@ static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
               remove(compiledPath);
             }
 
-            // Clean up temp SMD/QC files
+            // Clean up temp SMD/QC/physics files
             remove(tempSmd);
             remove(tempQc);
+            remove(tempPhySmd);
+            */
 
             return;
           }
