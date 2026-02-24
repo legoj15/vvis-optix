@@ -229,6 +229,89 @@ CPhysCollide *ComputeConvexHull(studiohdr_t *pStudioHdr) {
 //-----------------------------------------------------------------------------
 // Add, find collision model in cache
 //-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+// Embeds a patched copy of a forced non-$staticprop model into the BSP pakfile
+// with STUDIOHDR_FLAGS_STATIC_PROP set so the engine loads the flagged version.
+//-----------------------------------------------------------------------------
+static void EmbedPatchedModelInPak(char const *pModelName, CUtlBuffer &mdlBuf,
+                                   studiohdr_t *pStudioHdr) {
+  // Patch the flag in the in-memory MDL buffer
+  pStudioHdr->flags |= STUDIOHDR_FLAGS_STATIC_PROP;
+
+  // Write the patched MDL into the BSP pakfile
+  AddBufferToPak(GetPakFile(), pModelName, mdlBuf.Base(), mdlBuf.TellMaxPut(),
+                 false);
+
+  Msg("  Embedded patched model in BSP: %s\n", pModelName);
+
+  // Embed companion files (VTX, PHY) unmodified
+  char companionPath[1024];
+  const char *unmodifiedExts[] = {".dx90.vtx", ".phy"};
+
+  for (int e = 0; e < 2; ++e) {
+    V_strncpy(companionPath, pModelName, sizeof(companionPath));
+    V_SetExtension(companionPath, unmodifiedExts[e], sizeof(companionPath));
+
+    CUtlBuffer companionBuf;
+    if (g_pFullFileSystem->ReadFile(companionPath, NULL, companionBuf)) {
+      AddBufferToPak(GetPakFile(), companionPath, companionBuf.Base(),
+                     companionBuf.TellMaxPut(), false);
+      Msg("  Embedded companion file: %s\n", companionPath);
+    }
+  }
+
+  // Embed a modified VVD with vertices rotated +90 degrees on Z to match the
+  // coordinate system conversion that studiomdl normally bakes for $staticprop.
+  // +90 Z rotation: x' = -y, y' = x, z' = z
+  V_strncpy(companionPath, pModelName, sizeof(companionPath));
+  V_SetExtension(companionPath, ".vvd", sizeof(companionPath));
+
+  CUtlBuffer vvdBuf;
+  if (g_pFullFileSystem->ReadFile(companionPath, NULL, vvdBuf)) {
+    vertexFileHeader_t *pVvdHdr = (vertexFileHeader_t *)vvdBuf.Base();
+
+    if (pVvdHdr->id == MODEL_VERTEX_FILE_ID && pVvdHdr->vertexDataStart != 0) {
+      int numVerts = pVvdHdr->numLODVertexes[0];
+      mstudiovertex_t *pVerts =
+          (mstudiovertex_t *)((byte *)pVvdHdr + pVvdHdr->vertexDataStart);
+
+      for (int v = 0; v < numVerts; ++v) {
+        // Rotate position
+        float oldX = pVerts[v].m_vecPosition.x;
+        float oldY = pVerts[v].m_vecPosition.y;
+        pVerts[v].m_vecPosition.x = -oldY;
+        pVerts[v].m_vecPosition.y = oldX;
+
+        // Rotate normal
+        oldX = pVerts[v].m_vecNormal.x;
+        oldY = pVerts[v].m_vecNormal.y;
+        pVerts[v].m_vecNormal.x = -oldY;
+        pVerts[v].m_vecNormal.y = oldX;
+      }
+
+      // Rotate tangent vectors (Vector4D: x,y,z,w where w is handedness)
+      if (pVvdHdr->tangentDataStart != 0) {
+        Vector4D *pTangents =
+            (Vector4D *)((byte *)pVvdHdr + pVvdHdr->tangentDataStart);
+        for (int t = 0; t < numVerts; ++t) {
+          float oldX = pTangents[t].x;
+          float oldY = pTangents[t].y;
+          pTangents[t].x = -oldY;
+          pTangents[t].y = oldX;
+          // w (handedness) stays the same
+        }
+      }
+
+      Msg("  Rotated %d vertices +90 Z in VVD\n", numVerts);
+    }
+
+    AddBufferToPak(GetPakFile(), companionPath, vvdBuf.Base(),
+                   vvdBuf.TellMaxPut(), false);
+    Msg("  Embedded modified VVD: %s\n", companionPath);
+  }
+}
+
 static CPhysCollide *GetCollisionModel(char const *pModelName) {
   // Convert to a common string
   char *pTemp = (char *)_alloca(strlen(pModelName) + 1);
@@ -262,6 +345,13 @@ static CPhysCollide *GetCollisionModel(char const *pModelName) {
 
   // Compute the convex hull of the model...
   studiohdr_t *pStudioHdr = (studiohdr_t *)buf.PeekGet();
+
+  // If this model was forced as a static prop and doesn't have the flag,
+  // patch it and embed the modified model in the BSP pakfile.
+  if (g_bForceDynamicPropsAsStatic &&
+      !(pStudioHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP)) {
+    EmbedPatchedModelInPak(pModelName, buf, pStudioHdr);
+  }
 
   // necessary for vertex access
   SetCurrentModel(pStudioHdr);
