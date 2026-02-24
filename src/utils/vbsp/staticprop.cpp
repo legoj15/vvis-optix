@@ -626,12 +626,11 @@ static bool DecompilePhyToSmd(const char *pModelName, const char *pSmdPath,
       pCur = pName;
     }
   } else if (pStudioHdr && pStudioHdr->numbones > 0) {
-    // Single-solid $collisionmodel — use root bone's poseToBone
-    const mstudiobone_t *pBone = pStudioHdr->pBone(0);
-    for (int s = 0; s < collide.solidCount; ++s) {
-      MatrixCopy(pBone->poseToBone, solidPoseToBone[s]);
-      solidBoneIndex[s] = 0;
-    }
+    // Single-solid $collisionmodel: ICollisionQuery returns model-space
+    // vertices directly (studiomdl's ConvertToWorldSpace applies
+    // poseToBone then boneToWorld, which cancel out for a root bone).
+    // No transform needed — leave solidPoseToBone as identity.
+    // solidBoneIndex already defaults to 0.
   }
 
   // Write SMD header matching reference bone hierarchy
@@ -695,6 +694,17 @@ static bool DecompilePhyToSmd(const char *pModelName, const char *pSmdPath,
           for (int v = 0; v < 3; ++v) {
             Vector tmp;
             VectorITransform(triVerts[t * 3 + v], curPoseToBone, tmp);
+
+            // For $staticprop $collisionmodel, apply the same (Y, -X, Z)
+            // swap that WriteSMDFromModel applies to reference mesh vertices.
+            // Without this, physics vertices are rotated 90° around Z
+            // relative to the reference mesh.
+            if (!bIsCollisionJoints) {
+              float oldX = tmp.x;
+              tmp.x = tmp.y;
+              tmp.y = -oldX;
+            }
+
             triVerts[t * 3 + v] = tmp;
             triNormals[t * 3 + v].Init(); // zero out for accumulation
           }
