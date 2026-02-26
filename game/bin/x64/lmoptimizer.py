@@ -556,6 +556,27 @@ def _run_bsp_mode(args, root, t0: float) -> dict | None:
         print("\n  No BSP faces could be matched to VMF sides.")
         return None
 
+    # ─── Build texlight (emissive) side set unconditionally ────────────────────
+    # This is needed by both the visibility oracle AND the budget solver.
+    texlight_sides: set = set()
+    texlight_mats: set = set()
+    try:
+        from bsp_reader import _find_game_lights_rad
+        game_rad = _find_game_lights_rad(game_dir)
+        if game_rad:
+            texlight_mats |= _parse_texlight_materials(game_rad)
+    except Exception: pass
+    if getattr(args, 'lights', None) and Path(args.lights).is_file():
+        texlight_mats |= _parse_texlight_materials(Path(args.lights))
+    for side_id in face_data.keys():
+        node = side_map.get(side_id)
+        mat = (node.get_property('material') or '').upper().replace('\\\\', '/').strip('/') if node else ''
+        if mat in texlight_mats:
+            texlight_sides.add(side_id)
+    if texlight_sides:
+        print(f"  {len(texlight_sides)} texlight (emissive) sides identified",
+              flush=True)
+
     # ─── Phase 4.1: Visibility oracle (never-visible → uniform dark) ──────────
     never_visible_sides: set = set()
     nv_bsp_faces: set = set()
@@ -612,26 +633,6 @@ def _run_bsp_mode(args, root, t0: float) -> dict | None:
 
         # Cross-reference: override luminances for never-visible VMF sides
         raw_nv_sides = set()
-        texlight_sides = set()
-        
-        # Build global texlight material set first so we can identify ALL texlight sides
-        texlight_mats = set()
-        try:
-            from bsp_reader import _find_game_lights_rad
-            game_rad = _find_game_lights_rad(game_dir)
-            if game_rad:
-                texlight_mats |= _parse_texlight_materials(game_rad)
-        except Exception: pass
-        
-        if getattr(args, 'lights', None) and Path(args.lights).is_file():
-            texlight_mats |= _parse_texlight_materials(Path(args.lights))
-
-        # Identify texlight surface materials for ALL sides in the map
-        for side_id in face_data.keys():
-            node = side_map.get(side_id)
-            mat = (node.get_property('material') or '').upper().replace('\\\\', '/').strip('/') if node else ''
-            if mat in texlight_mats:
-                texlight_sides.add(side_id)
 
         if nv_bsp_faces:
             for side_id, fld in face_data.items():
@@ -783,6 +784,8 @@ def _run_bsp_mode(args, root, t0: float) -> dict | None:
             detail_min_scale=detail_min_scale,
             gradient_tolerance=args.gradient_tolerance,
             coplanar_groups=coplanar_grps,
+            emissive_sides=texlight_sides if texlight_sides else None,
+            uniform_max_luminance=args.dark_threshold,
             verbose=True,
         )
         
@@ -1945,14 +1948,55 @@ def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: 
     temp_bsp = temp_dir / (input_path.stem + '.bsp')
     
     try:
-        print(f"\\n[2/8] Compiling baseline BSP for reachability...", flush=True)
+        print(f"\\n[2/8] Compiling baseline BSP with lighting...", flush=True)
         try:
+            # Step 1: VBSP compile
+            print("  [2a/8] Running VBSP...", flush=True)
             compile_bsp(
                 vbsp_path, input_path, game_dir,
                 verbose=args.verbose, timeout=300,
                 extra_args=['-emitsideids']
             )
             compiled_bsp_source = input_path.with_suffix('.bsp')
+            
+            # Step 2: VVIS -fast (required for accurate VRAD lighting)
+            vvis_path = _resolve_vvis(args, vbsp_path)
+            if vvis_path:
+                print("  [2b/8] Running VVIS -fast...", flush=True)
+                ok = _run_vvis_fast(vvis_path, compiled_bsp_source,
+                                    game_dir, verbose=args.verbose)
+                if not ok:
+                    print("  WARNING: VVIS -fast failed — VRAD will use "
+                          "limited bounce lighting", flush=True)
+            else:
+                print("  WARNING: No VVIS found — skipping VIS pass",
+                      flush=True)
+            
+            # Step 3: VRAD fast compile (produces actual lighting data)
+            vrad_path = _resolve_vrad(args)
+            vrad_game = Path(args.vrad_game).resolve() if getattr(args, 'vrad_game', None) else game_dir
+            if vrad_path:
+                print("  [2c/8] Running VRAD fast compile...", flush=True)
+                from vrad_runner import compile_rad, VRADError
+                try:
+                    lights_rad = Path(args.lights).resolve() if getattr(args, 'lights', None) else None
+                    use_rtx = getattr(args, 'rtx', False)
+                    compile_rad(
+                        vrad_path, compiled_bsp_source, vrad_game,
+                        verbose=args.verbose, timeout=600,
+                        lights_rad=lights_rad, rtx=use_rtx,
+                    )
+                    print("  ✓ VRAD fast compile complete — BSP has lighting data",
+                          flush=True)
+                except (VRADError, TimeoutError) as e:
+                    print(f"  WARNING: VRAD fast compile failed: {e}",
+                          flush=True)
+                    print("  Continuing without lighting data — face "
+                          "classification will be limited", flush=True)
+            else:
+                print("  WARNING: No VRAD found — BSP will have no "
+                      "lighting data", flush=True)
+            
             shutil.copy2(compiled_bsp_source, temp_bsp)
         except (VBSPError, TimeoutError) as e:
             print("  ✗ Failed to auto-compile baseline BSP.", file=sys.stderr)

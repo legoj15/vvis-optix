@@ -3986,9 +3986,12 @@ void BuildFacelights(int iThread, int facenum) {
     // of spots
 #ifdef VRAD_RTX_CUDA_SUPPORT
     if (g_bUseGPU) {
-      // GPU path: point/surface/spot lights handled by GPU kernel.
-      // Sky lights (sun + ambient) evaluated here on CPU so the
-      // supersampler can smooth them without GPU/CPU mismatch.
+      // Legacy hybrid GPU path (retained for compatibility):
+      // point/surface/spot lights handled by GPU kernel.
+      // Sky lights (sun + ambient) evaluated here on CPU for the
+      // supersampler (m_flDirectSunAmount) — only used by CPU SS path.
+      // NOTE: The new GPUNative path (BuildFacelights_GPUNative) bypasses
+      // this entirely; the GPU kernel handles all light types including sky.
       GatherSampleLight_CollectGPURays(sampleInfo, nSample, numSamples,
                                        iThread);
     } else
@@ -4047,6 +4050,106 @@ void BuildFacelights(int iThread, int facenum) {
 }
 
 // (Old FinalizeFacelights removed — replaced by FinalizeAndSupersample above)
+
+#ifdef VRAD_RTX_CUDA_SUPPORT
+//-----------------------------------------------------------------------------
+// BuildFacelights_GPUNative — GPU-native geometry-only face setup.
+//
+// This is the new primary BuildFacelights path when g_bUseGPU is set.
+// It runs ONLY the geometry phase: InitLightinfo → CalcPoints →
+// InitSampleInfo → AllocateLightstyleSamples (style 0 only).
+//
+// NO CPU light gathering happens here at all. Since the GPU kernel
+// (optix_kernels.cu::__raygen__direct_lighting) handles ALL light types
+// including EMIT_SKYLIGHT and EMIT_SKYAMBIENT natively, there is no
+// need to collect per-sample sunAmount on the CPU. This eliminates:
+//   - GatherSampleLight_CollectGPURays CPU sky gather
+//   - All per-group SSE illumination-normal calls
+// The GPU kernel computes everything during TraceDirectLighting().
+//
+// After all faces have been processed by this function, BuildGPUSceneData
+// uploads the sample positions/normals and the GPU kernel launches.
+//-----------------------------------------------------------------------------
+void BuildFacelights_GPUNative(int iThread, int facenum) {
+  int j;
+  lightinfo_t l;
+  dface_t *f;
+  facelight_t *fl;
+  SSE_SampleInfo_t sampleInfo;
+
+  if (g_bInterrupt)
+    return;
+
+  f = &g_pFaces[facenum];
+  f->lightofs = -1;
+  for (j = 0; j < MAXLIGHTMAPS; j++)
+    f->styles[j] = 255;
+
+  // Trivial-reject: face not visible to any lights
+  if (!(g_FacesVisibleToLights[facenum >> 3] & (1 << (facenum & 7))))
+    return;
+
+  if (texinfo[f->texinfo].flags & TEX_SPECIAL)
+    return; // non-lit texture (sky, nodraw, etc.)
+
+  // Degenerate face — no patches — skip
+  if (g_FacePatches.Element(facenum) == g_FacePatches.InvalidIndex())
+    return;
+
+  fl = &facelight[facenum];
+
+  // Phase 1: Geometry setup — InitLightinfo gives us face plane/vectors,
+  // CalcPoints generates per-sample world-space positions and normals.
+  double tSetupStart = Plat_FloatTime();
+  InitLightinfo(&l, facenum);
+  CalcPoints(&l, fl, facenum);
+  InitSampleInfo(l, iThread, sampleInfo);
+
+  // Allocate style 0 lightmap output slots — required by DownloadAndApply
+  // and BuildPatchLights to know the face is lit.
+  f->styles[0] = 0;
+  AllocateLightstyleSamples(fl, 0, sampleInfo.m_NormalCount);
+  double tSetupEnd = Plat_FloatTime();
+  g_flBFL_Setup[iThread] += (tSetupEnd - tSetupStart);
+
+  // Phase 2: Compute illumination normals (smooth phong, bump basis).
+  // These update sample[].normal in-place — needed for GPUSampleData upload.
+  double tIllumStart = Plat_FloatTime();
+  int numGroups =
+      (fl->numsamples & 0x3) ? (fl->numsamples / 4) + 1 : (fl->numsamples / 4);
+
+  for (int grp = 0; grp < numGroups; ++grp) {
+    int nSample = 4 * grp;
+    sample_t *sample = fl->sample + nSample;
+    int numSamples = min(4, fl->numsamples - nSample);
+
+    Vector v[4], n[4];
+    for (int i = 0; i < 4; i++) {
+      v[i] = (i < numSamples) ? sample[i].pos : sample[numSamples - 1].pos;
+      n[i] =
+          (i < numSamples) ? sample[i].normal : sample[numSamples - 1].normal;
+    }
+    FourVectors positions, normals;
+    positions.LoadAndSwizzle(v[0], v[1], v[2], v[3]);
+    normals.LoadAndSwizzle(n[0], n[1], n[2], n[3]);
+
+    ComputeIlluminationPointAndNormalsSSE(l, positions, normals, &sampleInfo,
+                                          numSamples);
+
+    // Fixup sample normals for smooth/phong faces
+    if (!l.isflat) {
+      for (int i = 0; i < numSamples; i++)
+        sample[i].normal = sampleInfo.m_PointNormals[0].Vec(i);
+    }
+    // NOTE: No light gathering here — GPU handles everything.
+  }
+  double tIllumEnd = Plat_FloatTime();
+  g_flBFL_IllumNormals[iThread] += (tIllumEnd - tIllumStart);
+  g_nBFL_FacesProcessed[iThread]++;
+  // GPU direct lighting kernel will compute all light contributions from
+  // the sample positions/normals uploaded in BuildGPUSceneData().
+}
+#endif // VRAD_RTX_CUDA_SUPPORT
 
 void BuildPatchLights(int facenum) {
   int i, k;

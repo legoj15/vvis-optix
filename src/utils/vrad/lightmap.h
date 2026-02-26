@@ -182,6 +182,7 @@ extern long g_nBFL_FacesProcessed[MAX_TOOL_THREADS];
 
 #ifdef VRAD_RTX_CUDA_SUPPORT
 void FinalizeAndSupersample(int iThread, int facenum);
+void BuildFacelights_GPUNative(int iThread, int facenum);
 void BuildGPUSceneData();
 void ShutdownGPUSceneDataBridge();
 void LaunchGPUDirectLighting();

@@ -2239,23 +2239,21 @@ bool RadWorld_Go() {
     double start = Plat_FloatTime();
     double phaseStart;
 
-    // Sub-phase: BuildFacelights (CPU threaded)
+    // Sub-phase: Geometry setup (CPU threaded)
+    // GPU-native path: BuildFacelights_GPUNative runs only per-face
+    // geometry (InitLightinfo → CalcPoints → IllumNormals). No CPU light
+    // gathering occurs — all light types are handled by the GPU kernel.
+    // CPU path: full BuildFacelights with GatherSampleLightSSE per light.
     phaseStart = Plat_FloatTime();
 
 #ifdef VRAD_RTX_CUDA_SUPPORT
-    // Auto-compute ray batch threshold before BuildFacelights starts,
-    // since per-thread flush checks use g_nGPURayBatchSize during the build.
-    if (g_bUseGPU && !g_bGPURayBatchUserSet) {
-      g_nGPURayBatchSize = AutoComputeGPURayBatchSize(numthreads);
-    }
     if (g_bUseGPU) {
-      Msg("GPU ray batch threshold: %d rays/thread [%s] (%.1f MB/thread)\n",
-          g_nGPURayBatchSize, g_bGPURayBatchUserSet ? "manual" : "auto",
-          (float)g_nGPURayBatchSize * 76.0f / (1024.0f * 1024.0f));
-    }
+      RunThreadsOnIndividual(numfaces, true, BuildFacelights_GPUNative);
+    } else
 #endif
-
-    RunThreadsOnIndividual(numfaces, true, BuildFacelights);
+    {
+      RunThreadsOnIndividual(numfaces, true, BuildFacelights);
+    }
     double buildFacelightsTime = Plat_FloatTime() - phaseStart;
 
     double gpuDirectTime = 0;
@@ -2265,8 +2263,9 @@ bool RadWorld_Go() {
     double ssTime = 0;
     double sceneDataUploadTime = 0;
     if (g_bUseGPU) {
-      // Upload all sample/face/cluster data to VRAM
-      // now that BuildFacelights has populated facelight[].
+      // Upload all sample/face/cluster data to VRAM.
+      // BuildFacelights_GPUNative has populated facelight[].sample[]
+      // with world-space positions and phong-normalized normals.
       {
         extern void BuildGPUSceneData();
         double uploadStart = Plat_FloatTime();

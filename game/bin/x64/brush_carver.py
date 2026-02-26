@@ -268,7 +268,27 @@ def _find_split_planes(uniform_regions, varied_regions,
         return []
     
     if allow_multi:
-        return deduped
+        # Cap to MAX_CUTS_PER_AXIS per axis to prevent brush count explosion.
+        # 2 cuts per axis × 2 axes = up to 9 pieces per brush.
+        MAX_CUTS_PER_AXIS = 2
+        from collections import defaultdict
+        per_axis: dict = defaultdict(list)
+        for sp in deduped:
+            per_axis[sp.axis].append(sp)
+        capped: List[SplitPlane] = []
+        for axis, cuts in per_axis.items():
+            if len(cuts) <= MAX_CUTS_PER_AXIS:
+                capped.extend(cuts)
+            else:
+                # Keep the cuts that separate the most dark sub-faces
+                local_idx = 0 if axis == in_plane_axes[0] else 1
+                def _score(sp):
+                    above = sum(1 for r in uniform_ranges if r[local_idx][0] >= sp.value)
+                    below = sum(1 for r in uniform_ranges if r[local_idx][1] <= sp.value)
+                    return max(above, below)
+                cuts.sort(key=_score, reverse=True)
+                capped.extend(cuts[:MAX_CUTS_PER_AXIS])
+        return capped
     else:
         # Single cut: pick the best single boundary
         best = None

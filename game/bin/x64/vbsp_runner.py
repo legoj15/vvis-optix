@@ -279,6 +279,10 @@ def compile_bsp(vbsp_exe: Path,
     if verbose:
         print(f"  VBSP compile: {' '.join(cmd)}", flush=True)
     
+    # Record pre-existing BSP state so we can detect stale files
+    bsp_path = vmf_path.with_suffix('.bsp')
+    pre_mtime = bsp_path.stat().st_mtime if bsp_path.is_file() else None
+    
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -302,23 +306,35 @@ def compile_bsp(vbsp_exe: Path,
             for line in result.stdout.splitlines():
                 print(f"    [vbsp] {line}", flush=True)
         
-        # Check for BSP file FIRST — VBSP often exits with code 1 for
+        # Check for BSP file — VBSP often exits with code 1 for
         # non-fatal warnings (e.g. leaked maps: "Using unoptimized BSP
         # data on this map may cause engine crashes!") but still produces
         # a valid BSP.
-        bsp_path = vmf_path.with_suffix('.bsp')
+        #
+        # IMPORTANT: Only accept BSPs that were freshly created or modified
+        # by this invocation. A stale BSP from a prior compile must not be
+        # silently reused — that leads to optimizing against wrong data.
         if bsp_path.is_file():
-            if result.returncode != 0 and verbose:
-                print(f"  VBSP exited with code {result.returncode} "
-                      f"but BSP was produced (non-fatal warning)",
-                      flush=True)
-            return bsp_path
+            post_mtime = bsp_path.stat().st_mtime
+            is_fresh = (pre_mtime is None or post_mtime > pre_mtime)
+            
+            if is_fresh:
+                if result.returncode != 0 and verbose:
+                    print(f"  VBSP exited with code {result.returncode} "
+                          f"but BSP was produced (non-fatal warning)",
+                          flush=True)
+                return bsp_path
+            else:
+                # BSP exists but wasn't touched — stale from a previous run
+                if verbose:
+                    print(f"  WARNING: BSP file exists but was NOT modified "
+                          f"by this VBSP invocation (stale)", flush=True)
         
-        if result.returncode == 0:
+        if result.returncode == 0 and not bsp_path.is_file():
             raise VBSPError(
                 f"VBSP completed but BSP file not found: {bsp_path}")
         
-        # Non-zero exit AND no BSP produced — real failure
+        # Non-zero exit AND no fresh BSP produced — real failure
         output_tail = full_output.strip()[-500:]
         last_error = VBSPCompileError(
             f"VBSP exited with code {result.returncode} "
