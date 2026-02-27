@@ -138,6 +138,8 @@ double g_flCSRBuildTime = 0;
 bool g_bStaticPropLighting = false;
 bool g_bStaticPropPolys = false;
 bool g_bTextureShadows = false;
+bool g_bWorldTextureShadows = false;
+bool g_bTranslucentShadows = false;
 bool g_bDisablePropSelfShadowing = false;
 
 // Dedicated heap for transfer list allocations.  HeapDestroy releases all
@@ -2979,6 +2981,13 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       g_bDisablePropSelfShadowing = true;
     } else if (!Q_stricmp(argv[i], "-textureshadows")) {
       g_bTextureShadows = true;
+    } else if (!Q_stricmp(argv[i], "-worldtextureshadows")) {
+      g_bWorldTextureShadows = true;
+      g_bTextureShadows = true; // Implicitly required
+    } else if (!Q_stricmp(argv[i], "-translucentshadows")) {
+      g_bTranslucentShadows = true;
+      g_bWorldTextureShadows = true; // Implicitly required
+      g_bTextureShadows = true;      // Implicitly required
     } else if (!Q_stricmp(argv[i], "-cuda") || !Q_stricmp(argv[i], "-rtx")) {
       g_bUseGPU = true;
     } else if (!Q_stricmp(argv[i], "-gpuraybatch")) {
@@ -3350,6 +3359,10 @@ void PrintUsage(int argc, char **argv) {
       "normal vector\n"
       "  -textureshadows : Allows texture alpha channels to block light - rays "
       "intersecting alpha surfaces will sample the texture\n"
+      "  -worldtextureshadows : Allows $alphatest world brush textures to cast "
+      "texture shadows\n"
+      "  -translucentshadows : Allows $translucent world brush textures to "
+      "cast texture shadows\n"
       "  -noskyboxrecurse : Turn off recursion into 3d skybox (skybox shadows "
       "on world)\n"
       "  -nossprops      : Globally disable self-shadowing on static props\n"

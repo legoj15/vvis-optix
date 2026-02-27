@@ -659,11 +659,17 @@ public:
 
   // Checks the database for the material and loads if necessary
   // returns true if found and pIndex will be the index, -1 if no alpha shadows
-  bool FindOrLoadIfValid(const char *pMaterialName, int *pIndex) {
+  bool FindOrLoadIfValid(const char *pMaterialName, int *pIndex,
+                         bool *pIsTranslucent = nullptr,
+                         bool *pIsAlphaTest = nullptr) {
     *pIndex = -1;
     int index = m_Textures.Find(pMaterialName);
     bool bFound = false;
     if (index != m_Textures.InvalidIndex()) {
+      if (pIsTranslucent)
+        *pIsTranslucent = m_Textures[*pIndex].bIsTranslucent;
+      if (pIsAlphaTest)
+        *pIsAlphaTest = m_Textures[*pIndex].bIsAlphaTest;
       bFound = true;
       *pIndex = index;
     } else {
@@ -672,7 +678,11 @@ public:
       LoadFileIntoBuffer(buf, pMaterialName);
       if (pVMT->LoadFromBuffer(pMaterialName, buf)) {
         bFound = true;
-        if (pVMT->FindKey("$translucent") || pVMT->FindKey("$alphatest")) {
+
+        bool bIsTranslucentLocal = pVMT->FindKey("$translucent") != nullptr;
+        bool bIsAlphaTestLocal = pVMT->FindKey("$alphatest") != nullptr;
+
+        if (bIsTranslucentLocal || bIsAlphaTestLocal) {
           KeyValues *pBaseTexture = pVMT->FindKey("$basetexture");
           if (pBaseTexture) {
             const char *pBaseTextureName = pBaseTexture->GetString();
@@ -685,7 +695,13 @@ public:
               if (pImageBits) {
                 int index = m_Textures.Insert(pMaterialName);
                 m_Textures[index].InitFromRGB8888(w, h, pImageBits);
+                m_Textures[index].bIsTranslucent = bIsTranslucentLocal;
+                m_Textures[index].bIsAlphaTest = bIsAlphaTestLocal;
                 *pIndex = index;
+                if (pIsTranslucent)
+                  *pIsTranslucent = bIsTranslucentLocal;
+                if (pIsAlphaTest)
+                  *pIsAlphaTest = bIsAlphaTestLocal;
                 if (pVMT->FindKey("$nocull")) {
                   // UNDONE: Support this? Do we need to emit two triangles?
                   m_Textures[index].allowBackface = true;
@@ -813,11 +829,15 @@ public:
     bool allowBackface;
     bool clampU;
     bool clampV;
+    bool bIsTranslucent;
+    bool bIsAlphaTest;
     unsigned char *pAlphaTexels;
 
     void InitFromRGB8888(int w, int h, unsigned char *pTexels) {
       width = w;
       height = h;
+      bIsTranslucent = false;
+      bIsAlphaTest = false;
       pAlphaTexels = new unsigned char[w * h];
       for (int i = 0; i < h; i++) {
         for (int j = 0; j < w; j++) {
@@ -848,6 +868,25 @@ float ComputeCoverageFromTexture(float b0, float b1, float b2, int32 hitID) {
   Vector coords(b0, b1, b2);
   return alphaScale * g_ShadowTextureList.SampleMaterial(
                           g_RtEnv.GetTriangleMaterial(hitID), coords, false);
+}
+
+int LoadShadowTexture(const char *pMaterialName, bool *pIsTranslucent,
+                      bool *pIsAlphaTest) {
+  int nIndex = -1;
+  bool bFound = g_ShadowTextureList.FindOrLoadIfValid(
+      pMaterialName, &nIndex, pIsTranslucent, pIsAlphaTest);
+  return bFound ? nIndex : -1;
+}
+
+int AddShadowTextureTriangle(int shadowTextureIndex, const Vector2D &t0,
+                             const Vector2D &t1, const Vector2D &t2) {
+  return g_ShadowTextureList.AddMaterialEntry(shadowTextureIndex, t0, t1, t2);
+}
+
+float ComputeShadowTextureCoverage(int shadowTextureIndex, const Vector2D &t0,
+                                   const Vector2D &t1, const Vector2D &t2) {
+  return g_ShadowTextureList.ComputeCoverageForTriangle(shadowTextureIndex, t0,
+                                                        t1, t2);
 }
 
 #ifdef VRAD_RTX_CUDA_SUPPORT

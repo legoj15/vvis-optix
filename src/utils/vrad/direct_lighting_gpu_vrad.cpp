@@ -238,6 +238,11 @@ void BuildGPUSceneData() {
     bool hasBump = (texinfo[g_pFaces[f].texinfo].flags & SURF_BUMPLIGHT) != 0;
     hostFaceInfos[f].needsBumpmap = hasBump ? 1 : 0;
 
+    // Compute the flat face normal for the hacky offset that the CPU applies
+    // in ComputeIlluminationPointAndNormalsSSE: pInfo->m_Points += faceNormal;
+    Vector flatNormal;
+    VectorCopy(dplanes[g_pFaces[f].planenum].normal, flatNormal);
+
     if (hasBump) {
       hostFaceInfos[f].normalCount = NUM_BUMP_VECTS + 1; // 4: flat + 3 bump
 
@@ -245,8 +250,6 @@ void BuildGPUSceneData() {
       // NOTE: CPU (lightmap.cpp:4039) uses the raw plane normal without
       // side flipping for GetBumpNormals — must match exactly.
       texinfo_t *pTexInfo = &texinfo[g_pFaces[f].texinfo];
-      Vector flatNormal;
-      VectorCopy(dplanes[g_pFaces[f].planenum].normal, flatNormal);
 
       Vector bumpVects[NUM_BUMP_VECTS];
       GetBumpNormals(pTexInfo->textureVecsTexelsPerWorldUnits[0],
@@ -279,9 +282,12 @@ void BuildGPUSceneData() {
       sample_t &sample = fl->sample[s];
       GPUSampleData &gpu = hostSamples[sampleCursor];
 
-      gpu.position.x = sample.pos.x;
-      gpu.position.y = sample.pos.y;
-      gpu.position.z = sample.pos.z;
+      // CPU automatically shifts the initial sample ray positions +1 unit
+      // OUTWARDS along the normal. Doing this removes ALL the difference
+      // between GPU and CPU.
+      gpu.position.x = sample.pos.x + flatNormal.x;
+      gpu.position.y = sample.pos.y + flatNormal.y;
+      gpu.position.z = sample.pos.z + flatNormal.z;
       gpu.normal.x = sample.normal.x;
       gpu.normal.y = sample.normal.y;
       gpu.normal.z = sample.normal.z;

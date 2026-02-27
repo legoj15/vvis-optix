@@ -866,15 +866,8 @@ extern "C" __global__ void __raygen__direct_lighting() {
 
     // ---------------------------------------------------------------
     // Shadow ray: trace from sample toward light
-    // Offset origin along sample normal by DIST_EPSILON to avoid
-    // self-intersection with the face the sample sits on. This matches
-    // the standard OptiX technique — the CPU doesn't need this because
-    // BSP plane tests naturally skip the originating face.
     // ---------------------------------------------------------------
-    float3 offsetOrigin =
-        make_float3(samplePos.x + sampleNormal.x * GPU_DIST_EPSILON,
-                    samplePos.y + sampleNormal.y * GPU_DIST_EPSILON,
-                    samplePos.z + sampleNormal.z * GPU_DIST_EPSILON);
+    float3 offsetOrigin = make_float3(samplePos.x, samplePos.y, samplePos.z);
 
     float3 shadowDir = make_float3(shadowOrigin.x - offsetOrigin.x,
                                    shadowOrigin.y - offsetOrigin.y,

@@ -590,9 +590,98 @@ dmodel_t *BrushmodelForEntity(entity_t *pEntity) {
   return NULL;
 }
 
+void AddTexturedBrushWinding(winding_t *w, const VMatrix &xform, texinfo_t *tx,
+                             int shadowMaterialIndex) {
+  Vector2D *uv = new Vector2D[w->numpoints];
+  int mappingWidth = dtexdata[tx->texdata].width;
+  int mappingHeight = dtexdata[tx->texdata].height;
+
+  for (int j = 0; j < w->numpoints; j++) {
+    Vector vecS(tx->textureVecsTexelsPerWorldUnits[0][0],
+                tx->textureVecsTexelsPerWorldUnits[0][1],
+                tx->textureVecsTexelsPerWorldUnits[0][2]);
+    uv[j].x =
+        DotProduct(w->p[j], vecS) + tx->textureVecsTexelsPerWorldUnits[0][3];
+    uv[j].x /= float(mappingWidth);
+
+    Vector vecT(tx->textureVecsTexelsPerWorldUnits[1][0],
+                tx->textureVecsTexelsPerWorldUnits[1][1],
+                tx->textureVecsTexelsPerWorldUnits[1][2]);
+    uv[j].y =
+        DotProduct(w->p[j], vecT) + tx->textureVecsTexelsPerWorldUnits[1][3];
+    uv[j].y /= float(mappingHeight);
+  }
+
+  Vector v0, v1, v2;
+
+  for (int j = 2; j < w->numpoints; j++) {
+    v0 = xform.VMul4x3(w->p[0]);
+    v1 = xform.VMul4x3(w->p[j - 1]);
+    v2 = xform.VMul4x3(w->p[j]);
+    float coverage = ComputeShadowTextureCoverage(shadowMaterialIndex, uv[0],
+                                                  uv[j - 1], uv[j]);
+    int index = -1;
+    unsigned short flags = 0;
+    Vector fullCoverage(0, 0, 1);
+
+    if (coverage < 1.0f) {
+      index = AddShadowTextureTriangle(shadowMaterialIndex, uv[0], uv[j - 1],
+                                       uv[j]);
+      flags = FCACHETRI_TRANSPARENT;
+      fullCoverage.x = coverage;
+    }
+
+    g_RtEnv.AddTriangle(TRACE_ID_OPAQUE, v0, v1, v2, fullCoverage, flags,
+                        index);
+  }
+
+  delete[] uv;
+}
+
 void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
-  if (!(pBrush->contents & MASK_OPAQUE))
+  int materialIndexList[256];
+  bool bTextureShadows = false;
+
+  if (!(pBrush->contents & MASK_OPAQUE) &&
+      !(g_bTextureShadows && (pBrush->contents & CONTENTS_GRATE)))
     return;
+
+  if (pBrush->contents & CONTENTS_LADDER)
+    return;
+
+  if (g_bTextureShadows && (pBrush->contents & CONTENTS_GRATE) &&
+      pBrush->numsides < ARRAYSIZE(materialIndexList)) {
+    for (int i = 0; i < pBrush->numsides; i++) {
+      dbrushside_t *side = &dbrushsides[pBrush->firstside + i];
+      texinfo_t *tx = &texinfo[side->texinfo];
+      dtexdata_t *pTexData = &dtexdata[tx->texdata];
+      const char *pMaterialName =
+          TexDataStringTable_GetString(pTexData->nameStringTableID);
+
+      bool bIsTranslucent = false;
+      bool bIsAlphaTest = false;
+      materialIndexList[i] =
+          LoadShadowTexture(pMaterialName, &bIsTranslucent, &bIsAlphaTest);
+
+      // Only allow texture shadows if the CLI flags align with the material
+      // properties
+      if (materialIndexList[i] >= 0) {
+        bool bAllowShadow = false;
+        // From Valve wiki: "-worldtextureshadows" handles alphatest,
+        // "-translucentshadows" handles translucent.
+        if (bIsAlphaTest && g_bWorldTextureShadows)
+          bAllowShadow = true;
+        if (bIsTranslucent && g_bTranslucentShadows)
+          bAllowShadow = true;
+
+        if (bAllowShadow) {
+          bTextureShadows = true;
+        } else {
+          materialIndexList[i] = -1;
+        }
+      }
+    }
+  }
 
   Vector v0, v1, v2;
   for (int i = 0; i < pBrush->numsides; i++) {
@@ -614,13 +703,17 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
       ChopWindingInPlace(&w, plane->normal, plane->dist, 0);
     }
     if (w) {
-      for (int j = 2; j < w->numpoints; j++) {
-        v0 = xform.VMul4x3(w->p[0]);
-        v1 = xform.VMul4x3(w->p[j - 1]);
-        v2 = xform.VMul4x3(w->p[j]);
-        Vector fullCoverage;
-        fullCoverage.x = 1.0f;
-        g_RtEnv.AddTriangle(TRACE_ID_OPAQUE, v0, v1, v2, fullCoverage);
+      if (bTextureShadows && materialIndexList[i] >= 0) {
+        AddTexturedBrushWinding(w, xform, tx, materialIndexList[i]);
+      } else {
+        for (int j = 2; j < w->numpoints; j++) {
+          v0 = xform.VMul4x3(w->p[0]);
+          v1 = xform.VMul4x3(w->p[j - 1]);
+          v2 = xform.VMul4x3(w->p[j]);
+          Vector fullCoverage;
+          fullCoverage.x = 1.0f;
+          g_RtEnv.AddTriangle(TRACE_ID_OPAQUE, v0, v1, v2, fullCoverage);
+        }
       }
       FreeWinding(w);
     }

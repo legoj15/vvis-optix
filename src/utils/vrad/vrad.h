@@ -277,6 +277,8 @@ extern float g_flSkySampleScale; // extra sampling factor for indirect light
 extern bool g_bLargeDispSampleRadius;
 extern bool g_bStaticPropPolys;
 extern bool g_bTextureShadows;
+extern bool g_bWorldTextureShadows;
+extern bool g_bTranslucentShadows;
 extern bool g_bShowStaticPropNormals;
 extern bool g_bDisablePropSelfShadowing;
 
@@ -293,6 +295,15 @@ extern bool g_bUseAVX2;
 extern CUtlVector<char const *> g_NonShadowCastingMaterialStrings;
 extern void ForceTextureShadowsOnModel(const char *pModelName);
 extern bool IsModelTextureShadowsForced(const char *pModelName);
+extern int LoadShadowTexture(const char *pMaterialName,
+                             bool *pIsTranslucent = nullptr,
+                             bool *pIsAlphaTest = nullptr);
+extern int AddShadowTextureTriangle(int shadowTextureIndex, const Vector2D &t0,
+                                    const Vector2D &t1, const Vector2D &t2);
+extern float ComputeShadowTextureCoverage(int shadowTextureIndex,
+                                          const Vector2D &t0,
+                                          const Vector2D &t1,
+                                          const Vector2D &t2);
 
 // Raytracing
 
