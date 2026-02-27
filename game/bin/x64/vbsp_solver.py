@@ -100,6 +100,7 @@ def solve_with_vbsp(
     vbsp_exe: Path,
     game_dir: Path,
     input_vmf: Path,
+    bin_root: Path = None,
     vertex_budget: int = 65536,
     max_lm_dim: int = DEFAULT_MAX_LIGHTMAP_DIM,
     detail_type_materials: Optional[Set[str]] = None,
@@ -157,18 +158,6 @@ def solve_with_vbsp(
                          if ld and gradient_tolerance is not None else False)
                          and not face_is_emissive
                          and face_is_dark_enough)
-        
-        if fe.side_id in (153, 154, 141):
-            if ld:
-                print(f"Face {fe.side_id} [vbsp_solver]: "
-                      f"ld_valid={True} "
-                      f"perfectly_uniform={ld.is_perfectly_uniform} "
-                      f"is_never_visible={ld.is_never_visible} "
-                      f"emissive={face_is_emissive} "
-                      f"dark_enough={face_is_dark_enough} (mean={face_mean_lum} <= {uniform_max_luminance}) "
-                      f"-> uniform={face_uniform}", flush=True)
-            else:
-                print(f"Face {fe.side_id} [vbsp_solver]: NO LD! (skipped)", flush=True)
         
         # Determine minimum scale for this face
         mat_lower = fe.material.lower().replace('\\', '/')
@@ -236,7 +225,7 @@ def solve_with_vbsp(
                 node.set_property('lightmapscale', str(scale))
         
         writer.write_file(vmf_root, temp_vmf)
-        result = count_vertices(vbsp_exe, temp_vmf, game_dir, verbose=False)
+        result = count_vertices(vbsp_exe, temp_vmf, game_dir, bin_root=bin_root, verbose=False)
         vbsp_calls += 1
         
         return _CountResult(

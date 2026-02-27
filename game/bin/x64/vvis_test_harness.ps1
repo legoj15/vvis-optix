@@ -340,23 +340,21 @@ try {
 
     $start = Get-Date
 
-    # Use .NET Process class with event-based async output draining.
-    # CRITICAL: Do NOT use Task.Run() with PowerShell scriptblocks to drain
-    # stdout/stderr -- PS scriptblocks don't reliably run on .NET ThreadPool
-    # threads, causing the pipe buffer (4KB on Windows) to fill up and deadlock
-    # the child process. Instead, use BeginOutputReadLine/BeginErrorReadLine
-    # which use native .NET async callbacks that are guaranteed to drain the pipes.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = Join-Path $SDK_BIN "vvis_optix.exe"
-    $psi.Arguments = "-cuda -game `"$MOD_DIR`" `"$TEST_DIR\$MAP_NAME`""
-    $psi.WorkingDirectory = $SDK_BIN
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    # Use native Start-Process with file redirection to drain output safely.
+    # This prevents pipe buffer (4KB) deadlocks on Windows without needing
+    # complex .NET async event handlers.
+    $outLogTmp = "$env:TEMP\vvis_optix_cuda_out.txt"
+    $errLogTmp = "$env:TEMP\vvis_optix_cuda_err.txt"
+    Remove-Item $outLogTmp -ErrorAction SilentlyContinue
+    Remove-Item $errLogTmp -ErrorAction SilentlyContinue
 
     try {
-        $process = [System.Diagnostics.Process]::Start($psi)
+        $process = Start-Process -FilePath (Join-Path $SDK_BIN "vvis_optix.exe") `
+            -ArgumentList "-cuda -game `"$MOD_DIR`" `"$TEST_DIR\$MAP_NAME`"" `
+            -WorkingDirectory $SDK_BIN `
+            -RedirectStandardOutput $outLogTmp `
+            -RedirectStandardError $errLogTmp `
+            -NoNewWindow -PassThru
     }
     catch {
         Write-LogMessage "CRITICAL ERROR: Failed to start vvis_optix.exe -cuda: $($_.Exception.Message)"
@@ -367,25 +365,6 @@ try {
         Write-LogMessage "CRITICAL ERROR: Failed to start vvis_optix.exe -cuda. Process object is NULL."
         throw "FAIL"
     }
-
-    # Use .NET event-based async draining (reliable, no deadlock)
-    $cudaOutput = [System.Text.StringBuilder]::new()
-    $cudaErrors = [System.Text.StringBuilder]::new()
-
-    $outEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.AppendLine($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $cudaOutput
-
-    $errEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.AppendLine($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $cudaErrors
-
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
 
     $timedOut = $false
     $maxSeconds = [math]::Max($MIN_TIMEOUT, $controlTime.TotalSeconds * $TIMEOUT_MULT) + ($TimeoutExtensionMinutes * 60)
@@ -419,16 +398,17 @@ try {
         $process.WaitForExit()
     }
 
-    # Clean up event subscriptions
-    Unregister-Event -SourceIdentifier $outEvent.Name
-    Unregister-Event -SourceIdentifier $errEvent.Name
-    Remove-Job -Job $outEvent -Force
-    Remove-Job -Job $errEvent -Force
+    # Append standard output to full log
+    if (Test-Path $outLogTmp) {
+        Get-Content $outLogTmp | Out-File -FilePath $fullLogPath -Append -Encoding utf8
+    }
 
     # Save captured stderr if any
-    $errText = $cudaErrors.ToString()
-    if ($errText.Trim()) {
-        $errText | Out-File -FilePath "$TEST_DIR\vvis_optix_stderr.txt" -Encoding utf8
+    if (Test-Path $errLogTmp) {
+        $errText = Get-Content $errLogTmp -Raw
+        if ($errText -and $errText.Trim()) {
+            Copy-Item $errLogTmp "$TEST_DIR\vvis_optix_stderr.txt" -Force
+        }
     }
 
     # Final refresh to ensure exit code is captured

@@ -105,6 +105,7 @@ def find_vrad(search_dir: Optional[Path] = None) -> Optional[Path]:
 def count_lights(vrad_exe: Path,
                  bsp_path: Path,
                  game_dir: Path,
+                 bin_root: Path = None,
                  timeout: int = 300,
                  verbose: bool = False,
                  max_retries: int = 2,
@@ -119,6 +120,7 @@ def count_lights(vrad_exe: Path,
         vrad_exe: Path to vrad_rtx.exe (must have -countlights support)
         bsp_path: Path to the compiled BSP file to analyze
         game_dir: Game directory for VRAD's -game flag
+        bin_root: Bin root directory for VRAD's -binroot flag
         timeout: Maximum seconds to wait for VRAD (default: 300)
         verbose: If True, print VRAD's full output
         max_retries: Number of attempts (default: 2, covers Steam init failures)
@@ -155,11 +157,17 @@ def count_lights(vrad_exe: Path,
         '-countlights',
         '-game', str(game_dir),
     ]
+    if bin_root:
+        cmd.extend(['-binroot', str(Path(bin_root).resolve())])
     if lights_rad:
         cmd.extend(['-lights', str(Path(lights_rad).resolve())])
     cmd.append(bsp_no_ext)
     
     env = os.environ.copy()
+    if bin_root:
+        bin_path_x64 = str((Path(bin_root) / 'bin' / 'x64').resolve())
+        bin_path_32 = str((Path(bin_root) / 'bin').resolve())
+        env['PATH'] = f"{bin_path_x64}{os.pathsep}{bin_path_32}{os.pathsep}{env.get('PATH', '')}"
     
     if verbose:
         print(f"  VRAD: {' '.join(cmd)}", flush=True)
@@ -247,12 +255,14 @@ FAST_VRAD_ARGS = [
 def compile_rad(vrad_exe: Path,
                 bsp_path: Path,
                 game_dir: Path,
+                bin_root: Path = None,
                 timeout: int = 600,
                 verbose: bool = False,
                 max_retries: int = 2,
                 lights_rad: Path | None = None,
                 rtx: bool = False,
-                extra_args: list | None = None) -> Path:
+                extra_args: list | None = None,
+                stream_output: bool = False) -> Path:
     """Run a full VRAD compile to produce lighting data in the BSP.
     
     Unlike count_lights() which uses -countlights (early exit),
@@ -263,6 +273,7 @@ def compile_rad(vrad_exe: Path,
         vrad_exe: Path to vrad_rtx.exe
         bsp_path: Path to the compiled BSP file
         game_dir: Game directory for VRAD's -game flag
+        bin_root: Bin root directory for VRAD's -binroot flag
         timeout: Maximum seconds to wait for VRAD (default: 600)
         verbose: If True, print VRAD's full output
         max_retries: Number of attempts (default: 2)
@@ -299,6 +310,9 @@ def compile_rad(vrad_exe: Path,
         str(vrad_exe),
         '-game', str(game_dir),
     ]
+    if bin_root:
+        cmd.extend(['-binroot', str(Path(bin_root).resolve())])
+        
     cmd.extend(FAST_VRAD_ARGS)
     if rtx:
         cmd.append('-rtx')
@@ -309,6 +323,10 @@ def compile_rad(vrad_exe: Path,
     cmd.append(bsp_no_ext)
     
     env = os.environ.copy()
+    if bin_root:
+        bin_path_x64 = str((Path(bin_root) / 'bin' / 'x64').resolve())
+        bin_path_32 = str((Path(bin_root) / 'bin').resolve())
+        env['PATH'] = f"{bin_path_x64}{os.pathsep}{bin_path_32}{os.pathsep}{env.get('PATH', '')}"
     
     if verbose:
         print(f"  VRAD compile: {' '.join(cmd)}", flush=True)
@@ -316,40 +334,47 @@ def compile_rad(vrad_exe: Path,
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout,
                 cwd=str(vrad_exe.parent),
                 env=env,
             )
+            
+            output_lines = []
+            for line in process.stdout:
+                output_lines.append(line)
+                if stream_output:
+                    print(line, end='', flush=True)
+                elif verbose:
+                    print(f"    [vrad] {line}", end='', flush=True)
+                    
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            process.kill()
             raise TimeoutError(
                 f"VRAD timed out after {timeout}s on {bsp_path.name}")
         except FileNotFoundError:
             raise VRADNotFoundError(f"Could not execute: {vrad_exe}")
         
-        full_output = result.stdout + '\n' + result.stderr
-        
-        if verbose:
-            for line in result.stdout.splitlines():
-                print(f"    [vrad] {line}", flush=True)
+        full_output = ''.join(output_lines)
         
         # VRAD may exit non-zero for non-fatal warnings but still produce
         # valid lighting data in the BSP.  Check if BSP still exists.
         if bsp_path.is_file():
-            if result.returncode != 0 and verbose:
-                print(f"  VRAD exited with code {result.returncode} "
+            if process.returncode != 0 and verbose:
+                print(f"  VRAD exited with code {process.returncode} "
                       f"but BSP exists (non-fatal warning)", flush=True)
             return bsp_path
         
-        if result.returncode == 0:
+        if process.returncode == 0:
             return bsp_path
         
         output_tail = full_output.strip()[-500:]
         last_error = VRADCompileError(
-            f"VRAD exited with code {result.returncode} "
+            f"VRAD exited with code {process.returncode} "
             f"(attempt {attempt}/{max_retries}):\n{output_tail}")
         if attempt < max_retries:
             if verbose:

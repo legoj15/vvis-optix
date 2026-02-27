@@ -88,15 +88,17 @@ def find_vbsp(search_dir: Optional[Path] = None) -> Optional[Path]:
 def count_vertices(vbsp_exe: Path,
                    vmf_path: Path,
                    game_dir: Path,
+                   bin_root: Path = None,
                    timeout: int = 120,
                    verbose: bool = False,
-                   max_retries: int = 2) -> int:
-    """Run VBSP with -countverts and return the exact vertex count.
+                   max_retries: int = 2) -> VertexCount:
+    """Run VBSP with -countverts to get the total vertex count of the map.
     
     Args:
-        vbsp_exe: Path to vbsp_lmo.exe (must have -countverts support)
-        vmf_path: Path to the VMF file to analyze
+        vbsp_exe: Path to vbsp_lmo.exe
+        vmf_path: Path to the VMF file to check
         game_dir: Game directory for VBSP's -game flag
+        bin_root: Bin root directory for VBSP's -binroot flag
         timeout: Maximum seconds to wait for VBSP (default: 120)
         verbose: If True, print VBSP's full output
         max_retries: Number of attempts (default: 2, covers Steam init failures)
@@ -128,10 +130,17 @@ def count_vertices(vbsp_exe: Path,
         str(vbsp_exe),
         '-countverts',
         '-game', str(game_dir),
-        str(vmf_path),
     ]
+    if bin_root:
+        cmd.extend(['-binroot', str(Path(bin_root).resolve())])
+    cmd.append(str(vmf_path))
     
     env = os.environ.copy()
+    if bin_root:
+        # Prepend the binroot to PATH so that VBSP can load MaterialSystem.dll and other engine DLLs
+        bin_path_x64 = str((Path(bin_root) / 'bin' / 'x64').resolve())
+        bin_path_32 = str((Path(bin_root) / 'bin').resolve())
+        env['PATH'] = f"{bin_path_x64}{os.pathsep}{bin_path_32}{os.pathsep}{env.get('PATH', '')}"
     
     if verbose:
         print(f"  VBSP: {' '.join(cmd)}", flush=True)
@@ -225,6 +234,7 @@ def write_temp_vmf(root, output_path: Path) -> Path:
 def compile_bsp(vbsp_exe: Path,
                 vmf_path: Path,
                 game_dir: Path,
+                bin_root: Path = None,
                 timeout: int = 300,
                 verbose: bool = False,
                 max_retries: int = 2,
@@ -239,6 +249,7 @@ def compile_bsp(vbsp_exe: Path,
         vbsp_exe: Path to vbsp_lmo.exe
         vmf_path: Path to the VMF file to compile
         game_dir: Game directory for VBSP's -game flag
+        bin_root: Bin root directory for VBSP's -binroot flag
         timeout: Maximum seconds to wait for VBSP (default: 300)
         verbose: If True, print VBSP's full output
         max_retries: Number of attempts (default: 2)
@@ -250,7 +261,6 @@ def compile_bsp(vbsp_exe: Path,
     Raises:
         VBSPNotFoundError: If vbsp_exe doesn't exist
         VBSPCompileError: If VBSP exits with an error after all retries
-        TimeoutError: If VBSP exceeds the timeout
     """
     vbsp_exe = Path(vbsp_exe).resolve()
     vmf_path = Path(vmf_path).resolve()
@@ -265,16 +275,25 @@ def compile_bsp(vbsp_exe: Path,
     if not game_dir.is_dir():
         raise VBSPError(f"Game directory not found: {game_dir}")
     
-    # Build command line — no -countverts, full compile
+    # Build command line
     cmd = [
         str(vbsp_exe),
         '-game', str(game_dir),
     ]
+    if bin_root:
+        cmd.extend(['-binroot', str(Path(bin_root).resolve())])
+    
     if extra_args:
         cmd.extend(extra_args)
+        
     cmd.append(str(vmf_path))
     
     env = os.environ.copy()
+    if bin_root:
+        # Prepend the binroot to PATH so that VBSP can load MaterialSystem.dll and other engine DLLs
+        bin_path_x64 = str((Path(bin_root) / 'bin' / 'x64').resolve())
+        bin_path_32 = str((Path(bin_root) / 'bin').resolve())
+        env['PATH'] = f"{bin_path_x64}{os.pathsep}{bin_path_32}{os.pathsep}{env.get('PATH', '')}"
     
     if verbose:
         print(f"  VBSP compile: {' '.join(cmd)}", flush=True)

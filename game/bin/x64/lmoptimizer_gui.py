@@ -323,20 +323,20 @@ class LMOptimizerGUI:
         self.sv_game = self._file_row(
             frame, 'Game Dir:', 6, 'dir',
             tooltip='Game directory for VBSP -game flag\n'
-                    '(e.g. C:\\hl2\\hl2). Required when VBSP is used.',
+                    '(e.g. Source SDK Base 2013 Multiplayer\\sourcetest). Required when VBSP is used.',
         )
-        self.sv_vrad_game = self._file_row(
-            frame, 'VRAD Game:', 7, 'dir',
-            tooltip='Separate game directory for VRAD light counting.\n'
-                    'If blank, uses the Game Dir above.\n'
-                    'Useful when VBSP and VRAD need different game dirs\n'
-                    '(e.g. sourcetest for VBSP, garrysmod for VRAD).',
+        self.sv_binroot = self._file_row(
+            frame, 'Bin Root:', 7, 'dir',
+            tooltip='An engine root directory for finding compatible binaries (where hl2.exe or hl2_win64.exe is)\n'
+                    '(e.g. steamapps\\common\\Source SDK Base 2013 Multiplayer)\n'
+                    "Useful for when the target -game has incompatible binaries (such as Garry's Mod, or a 32bit engine)\n"
+                    'Passes as -binroot to all compile tools.',
         )
         self.sv_lights_rad = self._file_row(
             frame, 'Lights .rad:', 9, 'open',
             filetypes=[('RAD Files', '*.rad'), ('All', '*.*')],
             tooltip='Custom .rad lights file forwarded to VRAD\n'
-                    'during light counting (e.g. E:\\lights_custom.rad).\n'
+                    'during light counting (e.g. C:\\maps\\custom_lights.rad).\n'
                     'Leave blank to use only the game\'s default lights.rad.',
         )
 
@@ -509,7 +509,7 @@ class LMOptimizerGUI:
         spin_vw.pack(side='left', padx=4)
         ToolTip(spin_vw, 'Number of parallel worker processes for\n'
                          'visibility classification.\n'
-                         '0 = auto-detect (CPU cores - 2).\n'
+                         '0 = auto-detect (total CPU threads minus 2).\n'
                          '1 = serial (single-threaded).')
 
         self.bv_vis_debug = tk.BooleanVar(value=False)
@@ -703,7 +703,7 @@ class LMOptimizerGUI:
             'vrad': self.sv_vrad,
             'vvis': self.sv_vvis,
             'game': self.sv_game,
-            'vrad_game': self.sv_vrad_game,
+            'binroot': self.sv_binroot,
             'lights_rad': self.sv_lights_rad,
             'vertex_budget': self.sv_vertex_budget,
             'headroom': self.sv_headroom,
@@ -776,10 +776,10 @@ class LMOptimizerGUI:
         if game:
             cmd.extend(['--game', game])
 
-        # VRAD Game dir (separate from VBSP game dir)
-        vrad_game = self.sv_vrad_game.get().strip()
-        if vrad_game:
-            cmd.extend(['--vrad-game', vrad_game])
+        # Bin root dir
+        binroot = self.sv_binroot.get().strip()
+        if binroot:
+            cmd.extend(['--binroot', binroot])
 
         # Custom lights .rad file
         lights_rad = self.sv_lights_rad.get().strip()

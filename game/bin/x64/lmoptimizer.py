@@ -91,11 +91,9 @@ Examples:
                              'if omitted). Required for accurate light '
                              'counting — without VIS data, VRAD '
                              'under-counts surface lights.')
-    parser.add_argument('--vrad-game', type=str, default=None,
-                        help='Separate game directory for VRAD (used for '
-                             'light counting). If omitted, uses --game.\n'
-                             'Useful when VBSP and VRAD need different '
-                             'game directories (e.g. sourcetest vs garrysmod).')
+    parser.add_argument('--binroot', type=str, default=None,
+                        help='Bin root directory for the tools (e.g. C:\\hl2\\bin). '
+                             'Passed as -binroot to VBSP, VVIS, and VRAD.')
     parser.add_argument('--lights', type=str, default=None,
                         help='Path to a custom .rad lights file to forward '
                              'to VRAD during light counting '
@@ -249,8 +247,7 @@ Examples:
         vrad_path = _resolve_vrad(args)
         vvis_path = _resolve_vvis(args, vbsp_path)
         game_dir = _resolve_game_dir(args)
-        # Use --vrad-game if specified, otherwise fall back to --game
-        vrad_game_dir = Path(args.vrad_game).resolve() if args.vrad_game else game_dir
+        bin_root = Path(args.binroot).resolve() if args.binroot else None
         lights_rad = Path(args.lights).resolve() if args.lights else None
         if vbsp_path and vrad_path and game_dir:
             side_map = _build_vmf_side_map(root)
@@ -262,18 +259,50 @@ Examples:
                 vrad_exe=vrad_path,
                 vvis_exe=vvis_path,
                 game_dir=game_dir,
-                vrad_game_dir=vrad_game_dir,
+                bin_root=bin_root,
                 lights_rad=lights_rad,
-                light_budget=args.light_budget,
-                verbose=args.verbose,
+                args=args
             )
         elif args.light_budget > 0:
             if not vrad_path:
                 print("\n  (No vrad_rtx.exe found — skipping light budget check)",
                       flush=True)
             if not vbsp_path:
-                print("  (No vbsp_lmo.exe found — skipping light budget check)",
+                print("  (No vbsp_lmo.exe found — required for budget check)",
                       flush=True)
+            if not game_dir:
+                print("  (Invalid game dir — required for budget check)",
+                      flush=True)
+
+    # ─── Final Modification: Vis-Debug proxy textures ─────────────────────────
+    vis_debug = getattr(args, 'vis_debug', False)
+    if vis_debug and result:
+        nv_sides = result.get('raw_nv_sides', result.get('never_visible_sides', set()))
+        texlight_skip = result.get('texlight_sides', set())
+        texlight_mats = result.get('texlight_mats', set())
+        _VIS_MAT   = 'dev/dev_measuregeneric01'
+        _INVIS_MAT = 'dev/dev_measuregeneric01b'
+        
+        painted = 0
+        for world_node in root.get_children_by_name('world'):
+            for solid in world_node.get_children_by_name('solid'):
+                for side in solid.get_children_by_name('side'):
+                    cur_mat = (side.get_property('material') or '').upper().replace('\\', '/').strip('/')
+                    if cur_mat.startswith('TOOLS/'): continue
+                    if cur_mat in texlight_mats: continue
+                    
+                    sid = side.get_property('id')
+                    if sid:
+                        sid_int = int(sid)
+                        if sid_int in texlight_skip: continue
+                        mat = _INVIS_MAT if sid_int in nv_sides else _VIS_MAT
+                        side.set_property('material', mat)
+                        painted += 1
+        print(f"\n  [Vis Debug] Painted {painted} world faces with proxy textures.", flush=True)
+
+        # Write output file immediately!
+        from vmf_parser import VMFWriter
+        VMFWriter().write_file(root, output_path)
 
 
 def _print_solver_results(result, args):
@@ -778,6 +807,7 @@ def _run_bsp_mode(args, root, t0: float) -> dict | None:
             vbsp_exe=vbsp_path,
             game_dir=game_dir,
             input_vmf=input_path,
+            bin_root=getattr(args, 'binroot', None),
             vertex_budget=budget,
             max_lm_dim=max_lm_dim,
             detail_type_materials=detail_type_materials,
@@ -1486,7 +1516,12 @@ def _resolve_vvis(args, vbsp_path: Optional[Path] = None) -> Optional[Path]:
         candidate = vbsp_path.parent / 'vvis.exe'
         if candidate.is_file():
             return candidate
-    # Try the game dir's bin/x64
+    # Try the binroot or game dir's bin/x64
+    if hasattr(args, 'binroot') and args.binroot:
+        binroot_path = Path(args.binroot).resolve()
+        candidate = binroot_path / 'bin' / 'x64' / 'vvis.exe'
+        if candidate.is_file():
+            return candidate
     if hasattr(args, 'game') and args.game:
         game_path = Path(args.game).resolve()
         candidate = game_path.parent / 'bin' / 'x64' / 'vvis.exe'
@@ -1510,25 +1545,17 @@ def _resolve_vrad(args) -> Optional[Path]:
 
 
 def _resolve_game_dir(args) -> Optional[Path]:
-    """Resolve the game directory from args.
-
-    Also validates that the game installation has a bin/x64 folder,
-    which is required for 64-bit VBSP.  Incompatible installations
-    (e.g. Source SDK Base 2013 Singleplayer, Half-Life 2) lack this
-    folder and produce silently wrong results.
-    """
+    """Resolve the game directory from args."""
     if args.game:
         path = Path(args.game).resolve()
         if not path.is_dir():
             print(f"  WARNING: --game path not found: {path}", file=sys.stderr)
             return None
-        # The game dir is e.g. <root>/sourcetest or <root>/hl2mp.
-        # The engine binaries live in <root>/bin/x64.
-        bin_x64 = path.parent / 'bin' / 'x64'
-        if not bin_x64.is_dir():
+            
+        if not (path / 'gameinfo.txt').is_file():
             print(f"\n  ╔══════════════════════════════════════════════════╗",
                   file=sys.stderr)
-            print(f"  ║  ERROR: Incompatible --game directory!           ║",
+            print(f"  ║  ERROR: Missing gameinfo.txt in --game dir!      ║",
                   file=sys.stderr)
             print(f"  ╠══════════════════════════════════════════════════╣",
                   file=sys.stderr)
@@ -1536,23 +1563,57 @@ def _resolve_game_dir(args) -> Optional[Path]:
                   file=sys.stderr)
             print(f"  ║                                                  ║",
                   file=sys.stderr)
-            print(f"  ║  Missing: bin/x64 folder in parent directory.   ║",
+            print(f"  ║  The --game directory must contain gameinfo.txt. ║",
                   file=sys.stderr)
-            print(f"  ║  This game does not have 64-bit engine binaries.║",
+            print(f"  ║  You might have pointed it to the root folder    ║",
+                  file=sys.stderr)
+            print(f"  ║  instead of the specific mod folder.             ║",
+                  file=sys.stderr)
+            print(f"  ║                                                  ║",
+                  file=sys.stderr)
+            print(f"  ║  Examples of correct --game folders:             ║",
+                  file=sys.stderr)
+            print(f"  ║   • GarrysMod/garrysmod                          ║",
+                  file=sys.stderr)
+            print(f"  ║   • Half-Life 2/hl2                              ║",
+                  file=sys.stderr)
+            print(f"  ║   • Team Fortress 2/tf                           ║",
+                  file=sys.stderr)
+            print(f"  ╚══════════════════════════════════════════════════╝",
+                  file=sys.stderr)
+            sys.exit(1)
+        
+        # Validate engine binaries
+        engine_root = Path(args.binroot).resolve() if getattr(args, 'binroot', None) else path.parent
+        bin_x64 = engine_root / 'bin' / 'x64'
+        if not bin_x64.is_dir():
+            print(f"\n  ╔══════════════════════════════════════════════════╗",
+                  file=sys.stderr)
+            print(f"  ║  ERROR: Incompatible engine directory!           ║",
+                  file=sys.stderr)
+            print(f"  ╠══════════════════════════════════════════════════╣",
+                  file=sys.stderr)
+            print(f"  ║  {str(engine_root)[:48]:<48}║",
+                  file=sys.stderr)
+            print(f"  ║                                                  ║",
+                  file=sys.stderr)
+            print(f"  ║  Missing: bin/x64 folder in directory.          ║",
+                  file=sys.stderr)
+            print(f"  ║  This engine does not have 64-bit binaries.     ║",
                   file=sys.stderr)
             print(f"  ║                                                  ║",
                   file=sys.stderr)
             print(f"  ║  Compatible examples:                            ║",
                   file=sys.stderr)
-            print(f"  ║   • Source SDK Base 2013 Multiplayer/sourcetest  ║",
+            print(f"  ║   • Source SDK Base 2013 Multiplayer             ║",
                   file=sys.stderr)
-            print(f"  ║   • Half-Life 2 Deathmatch/hl2mp                ║",
+            print(f"  ║   • Half-Life 2 Deathmatch                      ║",
                   file=sys.stderr)
             print(f"  ║  Incompatible:                                   ║",
                   file=sys.stderr)
-            print(f"  ║   • Source SDK Base 2013 Singleplayer/sourcetest ║",
+            print(f"  ║   • Source SDK Base 2013 Singleplayer            ║",
                   file=sys.stderr)
-            print(f"  ║   • Half-Life 2/hl2                             ║",
+            print(f"  ║   • Half-Life 2                                 ║",
                   file=sys.stderr)
             print(f"  ╚══════════════════════════════════════════════════╝",
                   file=sys.stderr)
@@ -1569,11 +1630,10 @@ def _run_vbsp_verification(vbsp_path: Path, game_dir: Path,
     print()
     print("┌──────────────────────────────────────────────────┐")
     print("│          VBSP Verification                       │")
-    print("├──────────────────────────────────────────────────┤")
-
     try:
         vc = count_vertices(
             vbsp_path, output_vmf, game_dir,
+            bin_root=getattr(args, 'binroot', None),
             verbose=args.verbose,
         )
         budget = args.vertex_budget
@@ -1651,6 +1711,7 @@ def _find_game_lights_rad(game_dir: Path) -> Optional[Path]:
 
 
 def _run_vvis_fast(vvis_exe: Path, bsp_path: Path, game_dir: Path,
+                   bin_root: Path = None,
                    verbose: bool = False, timeout: int = 120) -> bool:
     """Run VVIS -fast on a BSP to generate minimal VIS data.
     
@@ -1662,12 +1723,22 @@ def _run_vvis_fast(vvis_exe: Path, bsp_path: Path, game_dir: Path,
     """
     bsp_no_ext = str(bsp_path.with_suffix(''))
     import subprocess
+    import os
     cmd = [
         str(vvis_exe),
         '-fast',
         '-game', str(game_dir),
-        bsp_no_ext,
     ]
+    if bin_root:
+        cmd.extend(['-binroot', str(Path(bin_root).resolve())])
+    cmd.append(bsp_no_ext)
+    
+    env = os.environ.copy()
+    if bin_root:
+        bin_path_x64 = str((Path(bin_root) / 'bin' / 'x64').resolve())
+        bin_path_32 = str((Path(bin_root) / 'bin').resolve())
+        env['PATH'] = f"{bin_path_x64}{os.pathsep}{bin_path_32}{os.pathsep}{env.get('PATH', '')}"
+
     if verbose:
         print(f"  VVIS: {' '.join(cmd)}", flush=True)
     try:
@@ -1677,6 +1748,7 @@ def _run_vvis_fast(vvis_exe: Path, bsp_path: Path, game_dir: Path,
             text=True,
             timeout=timeout,
             cwd=str(vvis_exe.parent),
+            env=env,
         )
         if verbose:
             for line in result.stdout.splitlines():
@@ -1696,62 +1768,56 @@ def _run_light_budget_enforcement(
     vrad_exe: Path,
     vvis_exe: Path | None = None,
     game_dir: Path = None,
-    vrad_game_dir: Path | None = None,
+    bin_root: Path | None = None,
     lights_rad: Path | None = None,
-    light_budget: int = 32767,
-    verbose: bool = False,
+    args=None,
 ) -> None:
     """Compile the optimized VMF, count surface lights, and degrade if over budget.
     
     This is a post-solver step that iteratively increases all non-skipped face
     lightmapscales until the surface light count is within the budget.
+    
+    Compiles the VMF in-place (BSP next to the VMF) to match Hammer's behavior
+    exactly, avoiding any temp-directory or environment discrepancies.
     """
-    import shutil
-    import tempfile
     from vbsp_runner import compile_bsp, VBSPError
     from vrad_runner import count_lights, VRADError, GMOD_LIGHT_LIMIT
     from vertex_estimator import should_skip_face
+    
+    light_budget = getattr(args, 'light_budget', 32767) if args else 32767
+    verbose = getattr(args, 'verbose', False) if args else False
     
     print()
     print("┌──────────────────────────────────────────────────┐")
     print("│          Surface Light Budget Check              │")
     print("├──────────────────────────────────────────────────┤")
     
-    # Set up a temp directory for compile iterations
-    temp_dir = Path(tempfile.mkdtemp(prefix='lmopt_lights_'))
-    temp_vmf = temp_dir / output_path.name
+    # Compile in-place: BSP goes next to the output VMF (matching Hammer)
+    bsp_path = output_path.with_suffix('.bsp')
+    cleanup_exts = ['.bsp', '.prt', '.log', '.lin']
     
-    # Apply Vis-Debug if enabled
-    vis_debug = getattr(args, 'vis_debug', False) if 'args' in globals() or 'args' in locals() else False
-    if vis_debug and 'bsp_result' in locals():
-        nv_sides = bsp_result.get('raw_nv_sides', bsp_result.get('never_visible_sides', set()))
-        texlight_skip = bsp_result.get('texlight_sides', set())
-        _VIS_MAT   = 'dev/dev_measuregeneric01'
-        _INVIS_MAT = 'dev/dev_measuregeneric01b'
-        for world_node in root.get_children_by_name('world'):
-            for solid in world_node.get_children_by_name('solid'):
-                for side in solid.get_children_by_name('side'):
-                    cur_mat = (side.get_property('material') or '').upper().replace('\\', '/')
-                    if cur_mat.startswith('TOOLS/'): continue
-                    sid = side.get_property('id')
-                    if sid:
-                        sid_int = int(sid)
-                        if sid_int in texlight_skip: continue
-                        mat = _INVIS_MAT if sid_int in nv_sides else _VIS_MAT
-                        side.set_property('material', mat)
-    # Note: args.vis_debug is better, let's pass it cleanly. Wait, we can't easily access args or bsp_result here without modifying signature.
+    def _cleanup_compile_artifacts():
+        """Remove compile artifacts created next to the VMF."""
+        for ext in cleanup_exts:
+            p = output_path.with_suffix(ext)
+            if p.is_file():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
     
     try:
-        # Copy the optimized VMF to temp dir for compilation
-        shutil.copy2(output_path, temp_vmf)
+        # Remove any stale BSP from a prior compile (e.g. from the solver step)
+        # so compile_bsp's freshness check doesn't pick up old data.
+        _cleanup_compile_artifacts()
         
-        # Phase 1: Compile with VBSP
+        # Phase 1: Compile with VBSP (in-place, BSP next to VMF)
         print(f"│  Compiling with VBSP...                         │", flush=True)
         try:
             bsp_path = compile_bsp(
-                vbsp_exe, temp_vmf, game_dir,
-                verbose=verbose, timeout=300,
-                extra_args=['-emitsideids'])
+                vbsp_exe, output_path, game_dir,
+                bin_root=bin_root,
+                verbose=verbose, timeout=300)
         except (VBSPError, TimeoutError) as e:
             print(f"│  ✗ VBSP compilation failed:                     │")
             for line in str(e).splitlines()[:2]:
@@ -1763,27 +1829,23 @@ def _run_light_budget_enforcement(
         # Without VIS, VRAD sets numbounce=0 and SubdividePatches() is skipped,
         # causing surface lights from texlights to be drastically under-counted.
         if vvis_exe:
-            # Use vrad_game_dir for VVIS if specified (for consistent gameinfo/mount)
-            vvis_gd = vrad_game_dir or game_dir
             print(f"│  Running VVIS -fast for VIS data...              │", flush=True)
-            if not _run_vvis_fast(vvis_exe, bsp_path, vvis_gd,
-                                  verbose=verbose, timeout=120):
+            if not _run_vvis_fast(vvis_exe, bsp_path, game_dir,
+                                  bin_root=bin_root, verbose=verbose, timeout=120):
                 print(f"│  ⚠ VVIS -fast failed — counts may be low        │")
         else:
             print(f"│  ⚠ No VVIS — surface light counts may be low     │")
         
-        # Use vrad_game_dir for VRAD if specified, otherwise use game_dir
-        vrad_gd = vrad_game_dir or game_dir
-        
         # Phase 2: Count lights with VRAD
         print(f"│  Counting surface lights with VRAD...            │", flush=True)
         if verbose:
-            print(f"│  VRAD game dir: {str(vrad_gd)[:33]:<33}│", flush=True)
+            print(f"│  VRAD game dir: {str(game_dir)[:33]:<33}│", flush=True)
             if lights_rad:
                 print(f"│  Lights .rad:   {str(lights_rad)[:33]:<33}│", flush=True)
         try:
             lc = count_lights(
-                vrad_exe, bsp_path, vrad_gd,
+                vrad_exe, bsp_path, game_dir,
+                bin_root=bin_root,
                 verbose=verbose, timeout=600,
                 lights_rad=lights_rad)
         except (VRADError, TimeoutError) as e:
@@ -1814,7 +1876,7 @@ def _run_light_budget_enforcement(
         # Collect texlight material names from lights.rad files
         texlight_mats = set()
         # Game's default lights.rad
-        game_rad = _find_game_lights_rad(vrad_gd)
+        game_rad = _find_game_lights_rad(game_dir)
         if game_rad:
             texlight_mats |= _parse_texlight_materials(game_rad)
         # Custom -lights file
@@ -1866,28 +1928,29 @@ def _run_light_budget_enforcement(
                 print(f"│  All emissive faces at max — cannot reduce more │")
                 break
             
-            # Re-write VMF, re-compile, re-count
-            writer.write_file(root, temp_vmf)
+            # Re-write VMF in-place, re-compile, re-count
+            writer.write_file(root, output_path)
             
             try:
                 bsp_path = compile_bsp(
-                    vbsp_exe, temp_vmf, game_dir,
-                    verbose=False, timeout=300,
-                    extra_args=['-emitsideids'])
+                    vbsp_exe, output_path, game_dir,
+                    bin_root=bin_root,
+                    verbose=False, timeout=300)
             except (VBSPError, TimeoutError) as e:
                 print(f"│  ✗ VBSP failed on iteration {iteration}               │")
                 break
             
             # Run VVIS -fast for VIS data
             if vvis_exe:
-                vvis_gd = vrad_game_dir or game_dir
-                if not _run_vvis_fast(vvis_exe, bsp_path, vvis_gd,
+                if not _run_vvis_fast(vvis_exe, bsp_path, game_dir,
+                                      bin_root=bin_root,
                                       verbose=False, timeout=120):
                     print(f"│  ⚠ VVIS failed on iteration {iteration}               │")
             
             try:
                 lc = count_lights(
-                    vrad_exe, bsp_path, vrad_gd,
+                    vrad_exe, bsp_path, game_dir,
+                    bin_root=bin_root,
                     verbose=False, timeout=600,
                     lights_rad=lights_rad)
             except (VRADError, TimeoutError) as e:
@@ -1921,19 +1984,133 @@ def _run_light_budget_enforcement(
         writer.write_file(root, output_path)
     
     finally:
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # Clean up compile artifacts (BSP, PRT, LOG, LIN) next to the VMF
+        _cleanup_compile_artifacts()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  AUTO-COMPILE MODE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: float) -> dict | None:
+def _find_safe_baseline(
+    root, args, vbsp_path: Path, game_dir: Path,
+    input_path: Path, vertex_budget: int, max_lm_dim: int,
+    verbose: bool = False,
+) -> int:
+    """Find the minimum global lightmapscale that fits within the vertex budget.
+    
+    Uses VBSP -countverts in a linear scan (scale=1, 2, 3...) to find the
+    lowest scale that doesn't crash VBSP or exceed the budget. Respects
+    entity-skip rules (func_monitor, etc.) and %detailtype min-scale.
+    
+    Returns:
+        The baseline scale (1–64), or 0 if nothing fits.
+    """
     import tempfile
+    from vmf_parser import VMFWriter
+    from vertex_estimator import should_skip_face, compute_face_extent, FaceExtent
+    from geometry import build_all_faces
+    from vbsp_runner import count_vertices
+    
+    # Build geometry + face extents
+    brush_entity_map = _build_brush_entity_map(root)
+    brushes = extract_brushes(root)
+    all_geometry_faces = build_all_faces(brushes)
+    side_map = _build_vmf_side_map(root)
+    
+    face_extents: list = []
+    for gf in all_geometry_faces:
+        side_node = side_map.get(gf.side_id)
+        if side_node is None:
+            continue
+        uaxis_str = side_node.get_property('uaxis') or ''
+        vaxis_str = side_node.get_property('vaxis') or ''
+        entity_class = brush_entity_map.get(gf.brush_id, '')
+        fe = compute_face_extent(
+            gf.vertices, uaxis_str, vaxis_str,
+            gf.lightmapscale, gf.side_id, gf.material,
+            brush_entity=entity_class,
+            has_displacement=bool(side_node.get_children_by_name('dispinfo')),
+        )
+        face_extents.append(fe)
+    
+    # Classify faces — skip tool textures, func_monitor, etc.
+    from vertex_estimator import min_scale_for_valid_extents
+    
+    unique_materials = {fe.material.lower().replace('\\', '/') for fe in face_extents}
+    from vmt_checker import scan_materials
+    detail_set = scan_materials(unique_materials, game_dir, verbose=False)
+    
+    detail_min_scale = args.detail_min_scale
+    eligible_sids: list = []
+    for fe in face_extents:
+        if should_skip_face(fe.material, fe.brush_entity):
+            continue
+        mat_lower = fe.material.lower().replace('\\', '/')
+        min_s = detail_min_scale if mat_lower in detail_set else 1
+        
+        # Enforce VBSP fatal extent limit (126 luxels max per dimension)
+        # Only applies to displacement faces — brush faces are subdivided first
+        if fe.has_displacement:
+            min_s = max(min_s, min_scale_for_valid_extents(fe.extent_s, fe.extent_t))
+            
+        eligible_sids.append((fe.side_id, min_s))
+    
+    print(f"  {len(eligible_sids)} eligible faces, "
+          f"{len(face_extents) - len(eligible_sids)} skipped (tools/entities)",
+          flush=True)
+    
+    # Linear scan for minimum safe scale
+    writer = VMFWriter()
+    temp_dir = Path(tempfile.mkdtemp(prefix='lmopt_baseline_'))
+    temp_vmf = temp_dir / input_path.name
+    
+    try:
+        for scale in range(1, 65):
+            # Apply this scale to all eligible faces
+            for sid, min_s in eligible_sids:
+                node = side_map.get(sid)
+                if node:
+                    node.set_property('lightmapscale', str(max(scale, min_s)))
+            
+            writer.write_file(root, temp_vmf)
+            
+            if verbose:
+                print(f"  [baseline] Testing global scale={scale}...",
+                      flush=True)
+            
+            try:
+                result = count_vertices(vbsp_path, temp_vmf, game_dir,
+                                        bin_root=getattr(args, 'binroot', None),
+                                        verbose=False)
+                fits = (result.count <= vertex_budget and
+                        result.leafface_count <= vertex_budget and
+                        result.face_count <= vertex_budget)
+                
+                if verbose:
+                    print(f"    Verts: {result.count:,}  "
+                          f"Leaffaces: {result.leafface_count:,}  "
+                          f"Faces: {result.face_count:,}  "
+                          f"({'under' if fits else 'OVER'} budget)",
+                          flush=True)
+                
+                if fits:
+                    return scale
+            except Exception as e:
+                if verbose:
+                    print(f"    VBSP error at scale={scale}: {e}", flush=True)
+                # VBSP crashed — this scale is too small, try next
+                continue
+        
+        return 0  # Nothing fits
+    finally:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: float) -> dict | None:
     import shutil
+    import hashlib
     from vbsp_runner import compile_bsp, VBSPError
 
     print("  Mode:   Auto-compile", flush=True)
@@ -1944,27 +2121,78 @@ def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: 
         print("  ERROR: VBSP and Game Dir are required for Auto-Compile mode.", file=sys.stderr)
         return None
 
-    temp_dir = Path(tempfile.mkdtemp(prefix='lmopt_auto_'))
-    temp_bsp = temp_dir / (input_path.stem + '.bsp')
+    max_lm_dim = args.max_lightmap_dim
+    budget = args.vertex_budget - args.headroom
+
+    # ─── Caching Setup ───────────────────────────────────────────────────────
+    cache_dir = input_path.parent / '.lmopt_cache'
+    cache_dir.mkdir(exist_ok=True)
     
+    # We use a map-specific cache file name so multiple maps can share the cache dir
+    cache_bsp = cache_dir / (input_path.stem + '.bsp')
+    cache_hash_file = cache_dir / (input_path.stem + '.vmf_hash')
+    
+    vmf_hash = ""
     try:
-        print(f"\\n[2/8] Compiling baseline BSP with lighting...", flush=True)
+        vmf_hash = hashlib.md5(open(input_path, 'rb').read()).hexdigest()
+    except OSError as e:
+        print(f"  WARNING: Could not hash input VMF: {e}", file=sys.stderr)
+        
+    skip_compile = False
+    if not getattr(args, 'no_cache', False) and cache_bsp.is_file() and cache_hash_file.is_file():
         try:
-            # Step 1: VBSP compile
-            print("  [2a/8] Running VBSP...", flush=True)
+            stored_hash = open(cache_hash_file, 'r').read().strip()
+            if stored_hash == vmf_hash:
+                print(f"  ✓ Cached baseline BSP found and VMF is unchanged (hash matched).", flush=True)
+                print(f"  Skipping baseline compile pipeline.", flush=True)
+                skip_compile = True
+        except OSError:
+            pass
+
+    if not skip_compile:
+        # ─── Step 1: Find safe baseline scale ────────────────────────────────────
+        print(f"\n[2/8] Finding safe baseline lightmapscale...", flush=True)
+        baseline = _find_safe_baseline(
+            root, args, vbsp_path, game_dir, input_path,
+            vertex_budget=budget, max_lm_dim=max_lm_dim,
+            verbose=True,
+        )
+    
+    if not skip_compile:
+        if baseline == 0:
+            print("  ✗ Map exceeds budget even at scale=64. Too many brushes.",
+                  file=sys.stderr)
+            return None
+        
+        print(f"  ✓ Baseline scale={baseline} fits budget", flush=True)
+        
+        # _find_safe_baseline already applied the baseline to all eligible
+        # side nodes on root.  Write the modified VMF so the full compile
+        # sees the safe scales (prevents VBSP crash on extreme maps).
+        from vmf_parser import VMFWriter
+        VMFWriter().write_file(root, input_path)
+        print(f"  Applied baseline scale={baseline} to VMF", flush=True)
+    
+        # ─── Step 2: Full compile (VBSP → VVIS → VRAD) ──────────────────────
+        print(f"\n[3/8] Compiling baseline BSP with lighting...", flush=True)
+        try:
+            # Step 2a: VBSP compile
+            print("  [3a/8] Running VBSP...", flush=True)
+            bin_root = Path(args.binroot).resolve() if args.binroot else None
             compile_bsp(
                 vbsp_path, input_path, game_dir,
+                bin_root=bin_root,
                 verbose=args.verbose, timeout=300,
                 extra_args=['-emitsideids']
             )
             compiled_bsp_source = input_path.with_suffix('.bsp')
             
-            # Step 2: VVIS -fast (required for accurate VRAD lighting)
+            # Step 2b: VVIS -fast (required for accurate VRAD lighting)
             vvis_path = _resolve_vvis(args, vbsp_path)
             if vvis_path:
-                print("  [2b/8] Running VVIS -fast...", flush=True)
+                print("  [3b/8] Running VVIS -fast...", flush=True)
                 ok = _run_vvis_fast(vvis_path, compiled_bsp_source,
-                                    game_dir, verbose=args.verbose)
+                                    game_dir, bin_root=bin_root, verbose=args.verbose)
                 if not ok:
                     print("  WARNING: VVIS -fast failed — VRAD will use "
                           "limited bounce lighting", flush=True)
@@ -1972,19 +2200,20 @@ def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: 
                 print("  WARNING: No VVIS found — skipping VIS pass",
                       flush=True)
             
-            # Step 3: VRAD fast compile (produces actual lighting data)
+            # Step 2c: VRAD fast compile (produces actual lighting data)
             vrad_path = _resolve_vrad(args)
-            vrad_game = Path(args.vrad_game).resolve() if getattr(args, 'vrad_game', None) else game_dir
             if vrad_path:
-                print("  [2c/8] Running VRAD fast compile...", flush=True)
+                print("  [3c/8] Running VRAD fast compile...", flush=True)
                 from vrad_runner import compile_rad, VRADError
                 try:
                     lights_rad = Path(args.lights).resolve() if getattr(args, 'lights', None) else None
                     use_rtx = getattr(args, 'rtx', False)
                     compile_rad(
-                        vrad_path, compiled_bsp_source, vrad_game,
+                        vrad_path, compiled_bsp_source, game_dir,
+                        bin_root=bin_root,
                         verbose=args.verbose, timeout=600,
                         lights_rad=lights_rad, rtx=use_rtx,
+                        stream_output=True,
                     )
                     print("  ✓ VRAD fast compile complete — BSP has lighting data",
                           flush=True)
@@ -1997,60 +2226,45 @@ def _run_auto_compile_mode(args, root, input_path: Path, output_path: Path, t0: 
                 print("  WARNING: No VRAD found — BSP will have no "
                       "lighting data", flush=True)
             
-            shutil.copy2(compiled_bsp_source, temp_bsp)
+            # Copy to cache directory and save hash
+            shutil.copy2(compiled_bsp_source, cache_bsp)
+            if vmf_hash:
+                with open(cache_hash_file, 'w') as f:
+                    f.write(vmf_hash)
+                    
+            # Cleanup original so it doesn't clutter mapping directory
+            for ext in ['.bsp', '.prt', '.log', '.lin']:
+                p = input_path.with_suffix(ext)
+                if p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+                        
         except (VBSPError, TimeoutError) as e:
             print("  ✗ Failed to auto-compile baseline BSP.", file=sys.stderr)
             return None
 
-        # Point args.bsp to our newly compiled bsp
-        args.bsp = str(temp_bsp)
+    # Point args.bsp to our cache bsp
+    args.bsp = str(cache_bsp)
         
-        # Run standard BSP pipeline
-        result = _run_bsp_mode(args, root, t0)
+    # Run standard BSP pipeline
+    result = _run_bsp_mode(args, root, t0)
 
-        if result is None:
-            return None
+    if result is None:
+        return None
 
-        if 'vbsp_solver_result' in result:
-            _print_vbsp_solver_results(result, args)
-        else:
-            _print_solver_results(result, args)
+    if 'vbsp_solver_result' in result:
+        _print_vbsp_solver_results(result, args)
+    else:
+        _print_solver_results(result, args)
 
-        # Apply Vis-Debug proxy textures if active
-        vis_debug = getattr(args, 'vis_debug', False)
-        if vis_debug:
-            nv_sides = result.get('raw_nv_sides', result.get('never_visible_sides', set()))
-            texlight_skip = result.get('texlight_sides', set())
-            texlight_mats = result.get('texlight_mats', set())
-            _VIS_MAT   = 'dev/dev_measuregeneric01'
-            _INVIS_MAT = 'dev/dev_measuregeneric01b'
-            
-            painted = 0
-            for world_node in root.get_children_by_name('world'):
-                for solid in world_node.get_children_by_name('solid'):
-                    for side in solid.get_children_by_name('side'):
-                        cur_mat = (side.get_property('material') or '').upper().replace('\\\\', '/').strip('/')
-                        if cur_mat.startswith('TOOLS/'): continue
-                        if cur_mat in texlight_mats: continue
-                        
-                        sid = side.get_property('id')
-                        if sid:
-                            sid_int = int(sid)
-                            if sid_int in texlight_skip: continue
-                            mat = _INVIS_MAT if sid_int in nv_sides else _VIS_MAT
-                            side.set_property('material', mat)
-                            painted += 1
-            print(f"\\n  [Vis Debug] Painted {painted} world faces with proxy textures.", flush=True)
+    # Write output file immediately!
+    from vmf_parser import VMFWriter
+    VMFWriter().write_file(root, output_path)
 
-        # Write output file immediately!
-        from vmf_parser import VMFWriter
-        VMFWriter().write_file(root, output_path)
-
-        # Return the result so light_budget_enforcement can run!
-        return result
-
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    # Return the result so light_budget_enforcement can run!
+    return result
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SIMULATION MODE — original pipeline with geometry + raycasting

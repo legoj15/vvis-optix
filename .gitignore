@@ -529,3 +529,4 @@ src/raytrace/nvcc_optix_stderr.txt
 *.vmx
 *_vistest*
 game/bin/x64/bsp_unit_tests/d1_trainstation_02_hrcs_optimized.vmf
+*.vmf_hash

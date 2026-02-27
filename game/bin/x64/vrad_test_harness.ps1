@@ -164,11 +164,12 @@ try {
     if ($HasReference) {
         Write-LogMessage "`n--- Comparing ref-cpu vs cpu (CPU Parity Check) ---"
         $pythonDiff = python bsp_diff_lightmaps.py "$REF_DIR\$MAP_NAME.bsp" "$CPU_DIR\$MAP_NAME.bsp" --threshold $LIGHTMAP_THRESH 2>&1
+        $bspDiffExitCode = $LASTEXITCODE
         $pythonDiff | Write-Host
         $pythonDiff | Out-File -FilePath $LOG_FILE -Append -Encoding utf8
 
-        if ($pythonDiff -like "*All lightmaps are identical.*") {
-            Write-LogMessage "RESULT: PASS (All lightmaps are identical)"
+        if ($bspDiffExitCode -eq 0) {
+            Write-LogMessage "RESULT: PASS"
         }
         else {
             if ($SkipVisualCheck) {
@@ -198,7 +199,8 @@ try {
                     }
                 }
                 else {
-                    Write-LogMessage "CRITICAL ERROR: Could not parse tgadiff output for ref-cpu vs cpu."
+                    Write-LogMessage "CRITICAL ERROR: Could not parse ssim diff output for ref-cpu vs cpu."
+                    Write-LogMessage "ssim diff output: $diffOutput"
                     throw "FAIL"
                 }
             }
@@ -211,25 +213,22 @@ try {
     Write-LogMessage "vrad_rtx.exe -cuda Log: $fullLogPath"
     $start = Get-Date
 
-    # Use .NET Process class with event-based async output draining.
-    # CRITICAL: Do NOT use Task.Run() with PowerShell scriptblocks to drain
-    # stdout/stderr -- PS scriptblocks don't reliably run on .NET ThreadPool
-    # threads, causing the pipe buffer (4KB on Windows) to fill up and deadlock
-    # the child process when it tries to write (typically around bounce 12-13).
-    # Instead, use BeginOutputReadLine/BeginErrorReadLine which use native .NET
-    # async callbacks that are guaranteed to drain the pipes.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = (Resolve-Path ".\vrad_rtx.exe").Path
+    # Use native Start-Process with file redirection to drain output safely.
+    # This prevents pipe buffer (4KB) deadlocks on Windows without needing
+    # complex .NET async event handlers.
     $cudaArgs = @($EXTRA_ARGS) + @("-game", "`"$MOD_DIR`"", "-cuda", "`"$GPU_DIR\$MAP_NAME`"")
-    $psi.Arguments = ($cudaArgs | Where-Object { $_ }) -join " "
-    $psi.WorkingDirectory = (Get-Location).Path
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    
+    $outLogTmp = "$env:TEMP\vrad_rtx_cuda_out.txt"
+    $errLogTmp = "$env:TEMP\vrad_rtx_cuda_err.txt"
+    Remove-Item $outLogTmp -ErrorAction SilentlyContinue
+    Remove-Item $errLogTmp -ErrorAction SilentlyContinue
 
     try {
-        $process = [System.Diagnostics.Process]::Start($psi)
+        $process = Start-Process -FilePath ".\vrad_rtx.exe" `
+            -ArgumentList $cudaArgs `
+            -RedirectStandardOutput $outLogTmp `
+            -RedirectStandardError $errLogTmp `
+            -NoNewWindow -PassThru
     }
     catch {
         Write-LogMessage "CRITICAL ERROR: Failed to start vrad_rtx.exe -cuda: $($_.Exception.Message)"
@@ -240,25 +239,6 @@ try {
         Write-LogMessage "CRITICAL ERROR: Failed to start vrad_rtx.exe -cuda. Process object is NULL."
         throw "FAIL"
     }
-
-    # Use .NET event-based async draining (reliable, no deadlock)
-    $cudaOutput = [System.Text.StringBuilder]::new()
-    $cudaErrors = [System.Text.StringBuilder]::new()
-
-    $outEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.AppendLine($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $cudaOutput
-
-    $errEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.AppendLine($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $cudaErrors
-
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
 
     $timedOut = $false
     $maxSeconds = ($cpuTime.TotalSeconds * $TIMEOUT_MULT) + ($TimeoutExtensionMinutes * 60)
@@ -284,16 +264,9 @@ try {
         $process.WaitForExit()
     }
 
-    # Clean up event subscriptions
-    Unregister-Event -SourceIdentifier $outEvent.Name
-    Unregister-Event -SourceIdentifier $errEvent.Name
-    Remove-Job -Job $outEvent -Force
-    Remove-Job -Job $errEvent -Force
-
-    # Save captured stderr if any
-    $errText = $cudaErrors.ToString()
-    if ($errText.Trim()) {
-        $errText | Out-File -FilePath "$env:TEMP\vrad_rtx_cuda_err.txt" -Encoding utf8
+    # Append standard output to full log
+    if (Test-Path $outLogTmp) {
+        Get-Content $outLogTmp | Out-File -FilePath $fullLogPath -Append -Encoding utf8
     }
 
     # Final refresh to ensure exit code is captured
@@ -324,11 +297,12 @@ try {
     if (-not $timedOut) {
         Write-LogMessage "`n--- Comparing cpu vs gpu (GPU Parity Check) ---"
         $pythonDiff = python bsp_diff_lightmaps.py "$CPU_DIR\$MAP_NAME.bsp" "$GPU_DIR\$MAP_NAME.bsp" --threshold $LIGHTMAP_THRESH 2>&1
+        $bspDiffExitCode = $LASTEXITCODE
         $pythonDiff | Write-Host
         $pythonDiff | Out-File -FilePath $LOG_FILE -Append -Encoding utf8
 
-        if ($pythonDiff -like "*All lightmaps are identical.*") {
-            Write-LogMessage "RESULT: PASS (All lightmaps are identical)"
+        if ($bspDiffExitCode -eq 0) {
+            Write-LogMessage "RESULT: PASS"
         }
         else {
             if ($SkipVisualCheck) {
@@ -336,9 +310,9 @@ try {
             }
             else {
                 Write-LogMessage "Initiating visual comparison for GPU..."
-                if (!(Test-Path "screenshot_cpu_$MAP_NAME.tga")) {
-                    Take-Screenshot "$CPU_DIR\$MAP_NAME.bsp" "screenshot_cpu_$MAP_NAME.tga"
-                }
+                # Always retake the CPU screenshot fresh to avoid stale resolution mismatches
+                # (e.g. a prior run at a different resolution cached on disk).
+                Take-Screenshot "$CPU_DIR\$MAP_NAME.bsp" "screenshot_cpu_$MAP_NAME.tga"
                 Take-Screenshot "$GPU_DIR\$MAP_NAME.bsp" "screenshot_gpu_$MAP_NAME.tga"
 
                 $diffOutput = python python_ssim_diff.py screenshot_cpu_$MAP_NAME.tga screenshot_gpu_$MAP_NAME.tga screenshot_diff_cpu_gpu_$MAP_NAME 2>&1
@@ -355,7 +329,8 @@ try {
                     }
                 }
                 else {
-                    Write-LogMessage "Warning: Could not parse tgadiff output for cpu vs gpu."
+                    Write-LogMessage "Warning: Could not parse ssim diff output for cpu vs gpu."
+                    Write-LogMessage "ssim diff output: $diffOutput"
                     throw "FAIL"
                 }
             }
