@@ -92,4 +92,14 @@
         ArchiveSuffix     = "named_lights"
         Groups            = @("props")
     }
+    gridlines        = @{
+        MapName           = "validation_vrad_gridlines"
+        ExtraArgs         = @()
+        TimeoutMultiplier = 3.0
+        RefCpuTolerance  = 3
+        CpuGpuTolerance = 0.2
+        LightmapThreshold = 0.1
+        ArchiveSuffix     = "gridlines"
+        Groups            = @("core")
+    }
 }
