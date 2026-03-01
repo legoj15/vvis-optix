@@ -782,25 +782,25 @@ public:
     float vmax = max(t0.y, t1.y);
     vmax = max(vmax, t2.y);
 
-    // UNDONE: Do something about tiling
-    umin = clamp(umin, 0, 1);
-    umax = clamp(umax, 0, 1);
-    vmin = clamp(vmin, 0, 1);
-    vmax = clamp(vmax, 0, 1);
-    Assert(umin >= 0.0f && umax <= 1.0f);
-    Assert(vmin >= 0.0f && vmax <= 1.0f);
+    // Removed flaw: do not clamp UVs to 0-1. World brushes have UVs far outside
+    // 0-1. We convert the float UV space bounding box into continuous integer
+    // texel coordinates, and then use modulo wrapping during the loop to sample
+    // correctly across boundaries.
     const alphatexture_t &tex = m_Textures.Element(shadowTextureIndex);
-    int u0 = umin * (tex.width - 1);
-    int u1 = umax * (tex.width - 1);
-    int v0 = vmin * (tex.height - 1);
-    int v1 = vmax * (tex.height - 1);
+
+    int u0 = floor(umin * tex.width);
+    int u1 = floor(umax * tex.width);
+    int v0 = floor(vmin * tex.height);
+    int v1 = floor(vmax * tex.height);
 
     int total = 0;
     int count = 0;
     for (int v = v0; v <= v1; v++) {
-      int row = (v * tex.width);
+      int wrapped_v = v & (tex.height - 1); // Assumes power of two
+      int row = (wrapped_v * tex.width);
       for (int u = u0; u <= u1; u++) {
-        total += tex.pAlphaTexels[row + u];
+        int wrapped_u = u & (tex.width - 1);
+        total += tex.pAlphaTexels[row + wrapped_u];
         count++;
       }
     }
@@ -852,12 +852,23 @@ public:
       bIsTranslucent = false;
       bIsAlphaTest = false;
       pAlphaTexels = new unsigned char[w * h];
+      int alphaMin = 255, alphaMax = 0;
+      long long alphaSum = 0;
       for (int i = 0; i < h; i++) {
         for (int j = 0; j < w; j++) {
           int index = (i * w) + j;
-          pAlphaTexels[index] = pTexels[index * 4 + 3];
+          unsigned char a = pTexels[index * 4 + 3];
+          pAlphaTexels[index] = a;
+          if (a < alphaMin)
+            alphaMin = a;
+          if (a > alphaMax)
+            alphaMax = a;
+          alphaSum += a;
         }
       }
+      float alphaAvg = (w * h > 0) ? float(alphaSum) / (w * h) : 0.0f;
+      Msg("  Shadow texture %dx%d alpha: min=%d max=%d avg=%.1f\n", w, h,
+          alphaMin, alphaMax, alphaAvg);
     }
   };
   struct materialentry_t {
