@@ -772,20 +772,6 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
       }
     }
   }
-  // Diagnostic: log brush decisions for texture shadow debugging
-  if (bShouldProbe) {
-    for (int d = 0;
-         d < pBrush->numsides && d < (int)ARRAYSIZE(materialIndexList); d++) {
-      dbrushside_t *dside = &dbrushsides[pBrush->firstside + d];
-      texinfo_t *dtx = &texinfo[dside->texinfo];
-      dtexdata_t *dTexData = &dtexdata[dtx->texdata];
-      const char *dName =
-          TexDataStringTable_GetString(dTexData->nameStringTableID);
-      Msg("  Brush side %d: mat=%s idx=%d trans=%d bTexShadows=%d\n", d, dName,
-          materialIndexList[d], isTranslucentList[d] ? 1 : 0,
-          bTextureShadows ? 1 : 0);
-    }
-  }
 
   // If this brush is NOT inherently opaque (e.g. CONTENTS_GRATE) and entered
   // only for texture shadow probing, but no face qualified for textured
@@ -870,21 +856,8 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
           // If alpha coverage is near-zero, the VTF alpha isn't meaningful
           // for shadow casting. Fall back to opaque shadow.
           if (cov < 0.01f) {
-            Msg("    -> side %d '%s' TRANSLUCENT FALLBACK to opaque "
-                "(cov=%.4f)\n",
-                i,
-                TexDataStringTable_GetString(
-                    dtexdata[tx->texdata].nameStringTableID),
-                cov);
             goto emit_opaque;
           }
-        }
-        {
-          dtexdata_t *pTD = &dtexdata[tx->texdata];
-          Msg("    -> side %d '%s' TEXTURED shadow (matIdx=%d, winding=%d "
-              "pts)\n",
-              i, TexDataStringTable_GetString(pTD->nameStringTableID),
-              materialIndexList[i], w->numpoints);
         }
         AddTexturedBrushWinding(w, xform, tx, materialIndexList[i]);
       } else {

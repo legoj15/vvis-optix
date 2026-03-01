@@ -635,6 +635,7 @@ public:
     IVTFTexture *pTex = CreateVTFTexture();
     if (!pTex->Unserialize(buf))
       return NULL;
+
     Msg("Loaded alpha texture %s\n", szPath);
     unsigned char *pSrcImage = pTex->ImageData(0, 0, 0, 0, 0, 0);
     int iWidth = pTex->Width();
@@ -767,8 +768,6 @@ public:
       }
 
       pTextureList[i] = textureIndex;
-      Msg("  Model tex %d: '%s' -> texIdx=%d (path='%s')\n", i,
-          pHdr->pTexture(i)->pszName(), textureIndex, szPath);
     }
   }
 
@@ -868,23 +867,12 @@ public:
       bIsAlphaTest = false;
       bIsPassBullets = false;
       pAlphaTexels = new unsigned char[w * h];
-      int alphaMin = 255, alphaMax = 0;
-      long long alphaSum = 0;
       for (int i = 0; i < h; i++) {
         for (int j = 0; j < w; j++) {
           int index = (i * w) + j;
-          unsigned char a = pTexels[index * 4 + 3];
-          pAlphaTexels[index] = a;
-          if (a < alphaMin)
-            alphaMin = a;
-          if (a > alphaMax)
-            alphaMax = a;
-          alphaSum += a;
+          pAlphaTexels[index] = pTexels[index * 4 + 3];
         }
       }
-      float alphaAvg = (w * h > 0) ? float(alphaSum) / (w * h) : 0.0f;
-      Msg("  Shadow texture %dx%d alpha: min=%d max=%d avg=%.1f\n", w, h,
-          alphaMin, alphaMax, alphaAvg);
     }
   };
   struct materialentry_t {
@@ -1116,7 +1104,7 @@ void CVradStaticPropMgr::CreateCollisionModel(char const *pModelName) {
   if (g_bTextureShadows) {
     bool bHasFlag = (pHdr->flags & STUDIOHDR_FLAGS_CAST_TEXTURE_SHADOWS) != 0;
     bool bForced = IsModelTextureShadowsForced(pModelName);
-    if (bHasFlag || bForced) {
+    if (bHasFlag || bForced || g_bAllTextureShadows) {
       m_StaticPropDict[i].m_textureShadowIndex.RemoveAll();
       m_StaticPropDict[i].m_triangleMaterialIndex.RemoveAll();
       m_StaticPropDict[i].m_textureShadowIndex.AddMultipleToTail(
@@ -2038,9 +2026,6 @@ void CVradStaticPropMgr::AddPolysForRayTrace(void) {
             shadowTextureIndex = dict.m_textureShadowIndex[pMesh->material];
           }
           if (shadowTextureIndex >= 0) {
-            Msg("  Prop %d mesh %d: material=%d shadowTexIdx=%d texName='%s'\n",
-                nProp, nMesh, pMesh->material, shadowTextureIndex,
-                pTxtr->pszName());
           }
 
           OptimizedModel::MeshHeader_t *pVtxMesh = pVtxLOD->pMesh(nMesh);
