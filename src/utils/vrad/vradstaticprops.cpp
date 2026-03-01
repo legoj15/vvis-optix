@@ -3053,6 +3053,13 @@ void MakePatchForTriangle(winding_t *w, Vector vRefl, int nStaticPropIdx) {
   patch->baselight.Init(0.0f, 0.0f, 0.0f);
   patch->basearea = 1;
   patch->reflectivity = vRefl;
+
+  // Add to secondary RT environment for detail/static prop indirect lighting
+  if (g_bStaticPropBounce) {
+    g_RtEnv_RadiosityPatches.AddTriangle(TRACE_ID_PATCH | ndxPatch, w->p[0],
+                                         w->p[1], w->p[2],
+                                         Vector(1.0f, 1.0f, 1.0f));
+  }
 }
 
 void CVradStaticPropMgr::MakePatches() {
@@ -3096,6 +3103,10 @@ void CVradStaticPropMgr::MakePatches() {
     }
   }
   qprintf("%i static prop patches\n", nPatchCount);
+
+  if (nPatchCount > 0) {
+    g_RtEnv_RadiosityPatches.SetupAccelerationStructure();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -3223,4 +3234,8 @@ void CVradStaticPropMgr::MakePatchesPrecise() {
     }
   }
   qprintf("%i static prop patches (precise)\n", nPatchCount);
+
+  if (nPatchCount > 0) {
+    g_RtEnv_RadiosityPatches.SetupAccelerationStructure();
+  }
 }

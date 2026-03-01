@@ -299,6 +299,10 @@ extern bool g_bStaticPropBounce;
 extern float g_flStaticPropBounceBoost;
 extern bool g_bStaticPropBouncePrecise;
 
+// Secondary RT environment containing static prop patches for indirect
+// light sampling by detail props and static prop per-vertex lighting.
+extern RayTracingEnvironment g_RtEnv_RadiosityPatches;
+
 // AVX2 mode: use FMA3/SSE4.1 SIMD instructions (opt-in via -avx2 flag)
 extern bool g_bUseAVX2;
 

@@ -92,6 +92,7 @@ bool g_bPrecision = false;
 bool g_bStaticPropBounce = false;
 float g_flStaticPropBounceBoost = 1.0f;
 bool g_bStaticPropBouncePrecise = false;
+RayTracingEnvironment g_RtEnv_RadiosityPatches;
 bool g_bUseAVX2 = false;
 char incrementfile[_MAX_PATH] = "";
 
@@ -3083,6 +3084,7 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       g_bStaticPropBounce = true;
     } else if (!Q_stricmp(argv[i], "-StaticPropBouncePrecise")) {
       g_bStaticPropBouncePrecise = true;
+      g_bStaticPropBounce = true; // Implies -StaticPropBounce
     } else if (!Q_stricmp(argv[i], "-avx2")) {
       g_bUseAVX2 = true;
     } else if (!Q_stricmp(argv[i], "-nocuda")) {
