@@ -2822,6 +2822,8 @@ void VRAD_LoadBSP(char const *pFilename) {
       // Upload texture shadow data to GPU if enabled
       if (g_bTextureShadows) {
         UploadTextureShadowDataToGPU();
+        RayTraceOptiX::SetFaceCulling(g_bBackfaceWTShadowCull,
+                                      g_bFrontfaceWTShadowCull);
       }
 
       end = Plat_FloatTime();
