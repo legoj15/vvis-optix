@@ -1508,7 +1508,7 @@ int main(int argc, char *argv[]) {
       // averaging luxels along shared edges. Each BSP edge is used
       // by exactly 2 faces (internal) or 1 face (boundary).
       std::cout << "  Cross-face edge stitching...\n";
-      if (0) // TEMPORARILY DISABLED for fullbright debug
+      if (1) // Re-enabled: per-face denoiser creates seams at face boundaries
       {
         // Build face index -> faceLuxels index lookup
         std::vector<int> faceToFLI(numfaces, -1);
