@@ -119,11 +119,33 @@ public:
                                             fltx4 *b1, fltx4 *b2, int32 hitID) {
     int sign = TestSignSIMD(*pHitMask);
     float addedCoverage[4];
+    // Compute backface: if ray direction dot triangle normal > 0, the ray
+    // hits the back of the triangle.  For non-$nocull materials, backface
+    // hits should be fully transparent (no shadow).
+    Vector triNormal(triangle.m_flNx, triangle.m_flNy, triangle.m_flNz);
     for (int s = 0; s < 4; s++) {
       addedCoverage[s] = 0.0f;
       if ((sign >> s) & 0x1) {
-        addedCoverage[s] = ComputeCoverageFromTexture(
-            b0->m128_f32[s], b1->m128_f32[s], b2->m128_f32[s], hitID);
+        bool bBackface = false;
+        bool bFrontface = false;
+        if (g_bBackfaceWTShadowCull || g_bFrontfaceWTShadowCull) {
+          Vector rayDir(rays.direction.X(s), rays.direction.Y(s),
+                        rays.direction.Z(s));
+          float dot = DotProduct(rayDir, triNormal);
+          bBackface = dot > 0.0f;
+          bFrontface = dot < 0.0f;
+          // Backface cull: skip shadow from triangles hit from behind
+          if (g_bBackfaceWTShadowCull && bBackface) {
+            continue;
+          }
+          // Frontface cull: skip shadow from triangles hit from the front
+          if (g_bFrontfaceWTShadowCull && bFrontface) {
+            continue;
+          }
+        }
+        addedCoverage[s] =
+            ComputeCoverageFromTexture(b0->m128_f32[s], b1->m128_f32[s],
+                                       b2->m128_f32[s], hitID, bBackface);
       }
     }
     m_coverage = AddSIMD(m_coverage, LoadUnalignedSIMD(addedCoverage));
@@ -663,16 +685,22 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
   if (pBrush->contents & CONTENTS_LADDER)
     return;
 
-  // Probe materials: load alpha textures to check for texture shadow
-  // candidates. Only probe when world-brush texture shadows are possible for
-  // this brush.
-  bool bShouldProbe = false;
-  if (g_bWorldTextureShadows && bIsGrate)
-    bShouldProbe = true;
-  if (g_bAllTextureShadows)
-    bShouldProbe = true;
+  // Probe materials: load alpha textures to identify texture shadow candidates.
+  // Always probe when ANY texture shadow flag is active so that $translucent /
+  // $alphatest faces on non-GRATE opaque brushes get tagged as -3 ("has alpha
+  // but rejected") and skipped from opaque emission.  Without probing, these
+  // faces would silently emit opaque rectangles, casting solid shadows for
+  // surfaces that are visually see-through.
+  bool bShouldProbe = g_bTextureShadows;
 
   if (bShouldProbe && pBrush->numsides < ARRAYSIZE(materialIndexList)) {
+    // Track per-face material type for mixed-material rejection
+    bool isAlphaTestList[256];
+    bool isPassBulletsList[256];
+
+    // Pass 1: probe all faces and categorize material types
+    bool bHasAlphaTestFace = false;
+    bool bHasNonGrateMaterial = false;
     for (int i = 0; i < pBrush->numsides; i++) {
       dbrushside_t *side = &dbrushsides[pBrush->firstside + i];
       texinfo_t *tx = &texinfo[side->texinfo];
@@ -682,31 +710,64 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
 
       bool bIsTranslucent = false;
       bool bIsAlphaTest = false;
-      materialIndexList[i] =
-          LoadShadowTexture(pMaterialName, &bIsTranslucent, &bIsAlphaTest);
+      bool bIsPassBullets = false;
+      materialIndexList[i] = LoadShadowTexture(pMaterialName, &bIsTranslucent,
+                                               &bIsAlphaTest, &bIsPassBullets);
       isTranslucentList[i] = bIsTranslucent;
+      isAlphaTestList[i] = bIsAlphaTest;
+      isPassBulletsList[i] = bIsPassBullets;
 
-      // Gate: only allow texture shadows matching the active CLI flag scope.
+      if (materialIndexList[i] >= 0 && bIsAlphaTest && bIsGrate &&
+          g_bWorldTextureShadows)
+        bHasAlphaTestFace = true;
+      // Detect non-GRATE alpha materials: materials with alpha but without
+      // %compilepassbullets (e.g. glass windows) that happen to be on a
+      // GRATE brush.  Their presence indicates a mixed-use brush that
+      // shouldn't cast per-face textured shadows.
+      if (materialIndexList[i] >= 0 && !bIsPassBullets && bIsGrate)
+        bHasNonGrateMaterial = true;
+    }
+
+    // Pass 2: apply flag hierarchy.
+    // On GRATE brushes with non-GRATE alpha materials (e.g. glass without
+    // %compilepassbullets), reject ALL faces.  Even though the GRATE faces
+    // (like metalfence007a) are individually valid, emitting them creates
+    // textured shadows that visibly overlay onto nearby prop shadows.
+    // Rejecting the entire brush falls back to old VRAD behavior (no shadow
+    // for GRATE brushes with mixed non-GRATE materials).
+    bool bMixedReject = bHasNonGrateMaterial && !g_bAllTextureShadows;
+
+    for (int i = 0; i < pBrush->numsides; i++) {
       if (materialIndexList[i] >= 0) {
         bool bAllowShadow = false;
 
-        if (g_bAllTextureShadows) {
+        if (bMixedReject) {
+          // Non-GRATE material on GRATE brush: reject all faces
+          bAllowShadow = false;
+        } else if (g_bAllTextureShadows) {
           // -alltextureshadows: any material with alpha on any brush
           bAllowShadow = true;
         } else if (bIsGrate) {
-          // CONTENTS_GRATE restricted modes:
           // -worldtextureshadows: $alphatest grate brushes only
-          if (bIsAlphaTest && g_bWorldTextureShadows)
+          if (isAlphaTestList[i] && g_bWorldTextureShadows)
             bAllowShadow = true;
-          // -translucentshadows: also $translucent grate brushes
-          if (bIsTranslucent && g_bTranslucentShadows)
-            bAllowShadow = true;
+          // -translucentshadows: $translucent grate brushes, BUT only if
+          // the material has %compilepassbullets (legitimate GRATE material)
+          // OR if no $alphatest face exists on this brush (no mixing issue).
+          if (isTranslucentList[i] && g_bTranslucentShadows) {
+            if (isPassBulletsList[i] || !bHasAlphaTestFace)
+              bAllowShadow = true;
+          }
         }
 
         if (bAllowShadow) {
           bTextureShadows = true;
         } else {
-          materialIndexList[i] = -1;
+          // -3 = "has alpha material but rejected by flag hierarchy".
+          // Distinct from -1 (no alpha material) so the emission loop can
+          // skip these faces rather than emitting them as opaque geometry,
+          // which would block light that should pass through.
+          materialIndexList[i] = -3;
         }
       }
     }
@@ -768,10 +829,11 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
         FreeWinding(w);
         continue;
       }
-      // On non-opaque brushes (GRATE etc.), faces without a valid texture
-      // shadow index were either rejected by the flag hierarchy or have no
-      // alpha.  Don't emit them as opaque — that would be worse than no shadow.
-      if (!bIsOpaque && bTextureShadows && materialIndexList[i] < 0) {
+      // -3 = face has an alpha material that was rejected by the flag
+      // hierarchy (e.g. $translucent face under -worldtextureshadows).
+      // Emitting it as opaque would create a solid shadow for a surface
+      // that is visually see-through, blocking light behind it.
+      if (bShouldProbe && materialIndexList[i] == -3) {
         FreeWinding(w);
         continue;
       }

@@ -141,6 +141,8 @@ bool g_bTextureShadows = false;
 bool g_bWorldTextureShadows = false;
 bool g_bTranslucentShadows = false;
 bool g_bAllTextureShadows = false;
+bool g_bBackfaceWTShadowCull = false;
+bool g_bFrontfaceWTShadowCull = false;
 bool g_bDisablePropSelfShadowing = false;
 
 // Dedicated heap for transfer list allocations.  HeapDestroy releases all
@@ -2994,6 +2996,10 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       g_bTranslucentShadows = true; // Implicitly required
       g_bWorldTextureShadows = true;
       g_bTextureShadows = true;
+    } else if (!Q_stricmp(argv[i], "-backfacewtshadowcull")) {
+      g_bBackfaceWTShadowCull = true;
+    } else if (!Q_stricmp(argv[i], "-frontfacewtshadowcull")) {
+      g_bFrontfaceWTShadowCull = true;
     } else if (!Q_stricmp(argv[i], "-cuda") || !Q_stricmp(argv[i], "-rtx")) {
       g_bUseGPU = true;
     } else if (!Q_stricmp(argv[i], "-gpuraybatch")) {

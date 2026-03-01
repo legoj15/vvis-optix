@@ -661,7 +661,8 @@ public:
   // returns true if found and pIndex will be the index, -1 if no alpha shadows
   bool FindOrLoadIfValid(const char *pMaterialName, int *pIndex,
                          bool *pIsTranslucent = nullptr,
-                         bool *pIsAlphaTest = nullptr) {
+                         bool *pIsAlphaTest = nullptr,
+                         bool *pIsPassBullets = nullptr) {
     *pIndex = -1;
     int index = m_Textures.Find(pMaterialName);
     bool bFound = false;
@@ -671,6 +672,8 @@ public:
         *pIsTranslucent = m_Textures[index].bIsTranslucent;
       if (pIsAlphaTest)
         *pIsAlphaTest = m_Textures[index].bIsAlphaTest;
+      if (pIsPassBullets)
+        *pIsPassBullets = m_Textures[index].bIsPassBullets;
       bFound = true;
     } else {
       KeyValues *pVMT = new KeyValues("vmt");
@@ -694,6 +697,12 @@ public:
 
         bool bIsTranslucentLocal = pVMT->FindKey("$translucent") != nullptr;
         bool bIsAlphaTestLocal = pVMT->FindKey("$alphatest") != nullptr;
+        bool bIsPassBulletsLocal = false;
+        {
+          KeyValues *pPB = pVMT->FindKey("%compilepassbullets");
+          if (pPB && pPB->GetInt() != 0)
+            bIsPassBulletsLocal = true;
+        }
 
         if (bIsTranslucentLocal || bIsAlphaTestLocal) {
           KeyValues *pBaseTexture = pVMT->FindKey("$basetexture");
@@ -710,11 +719,14 @@ public:
                 m_Textures[index].InitFromRGB8888(w, h, pImageBits);
                 m_Textures[index].bIsTranslucent = bIsTranslucentLocal;
                 m_Textures[index].bIsAlphaTest = bIsAlphaTestLocal;
+                m_Textures[index].bIsPassBullets = bIsPassBulletsLocal;
                 *pIndex = index;
                 if (pIsTranslucent)
                   *pIsTranslucent = bIsTranslucentLocal;
                 if (pIsAlphaTest)
                   *pIsAlphaTest = bIsAlphaTestLocal;
+                if (pIsPassBullets)
+                  *pIsPassBullets = bIsPassBulletsLocal;
                 if (pVMT->FindKey("$nocull")) {
                   // UNDONE: Support this? Do we need to emit two triangles?
                   m_Textures[index].allowBackface = true;
@@ -755,6 +767,8 @@ public:
       }
 
       pTextureList[i] = textureIndex;
+      Msg("  Model tex %d: '%s' -> texIdx=%d (path='%s')\n", i,
+          pHdr->pTexture(i)->pszName(), textureIndex, szPath);
     }
   }
 
@@ -844,6 +858,7 @@ public:
     bool clampV;
     bool bIsTranslucent;
     bool bIsAlphaTest;
+    bool bIsPassBullets;
     unsigned char *pAlphaTexels;
 
     void InitFromRGB8888(int w, int h, unsigned char *pTexels) {
@@ -851,6 +866,7 @@ public:
       height = h;
       bIsTranslucent = false;
       bIsAlphaTest = false;
+      bIsPassBullets = false;
       pAlphaTexels = new unsigned char[w * h];
       int alphaMin = 255, alphaMax = 0;
       long long alphaSum = 0;
@@ -884,18 +900,17 @@ public:
 // global to keep the shadow-casting texture list and their alpha bits
 CShadowTextureList g_ShadowTextureList;
 
-float ComputeCoverageFromTexture(float b0, float b1, float b2, int32 hitID) {
+float ComputeCoverageFromTexture(float b0, float b1, float b2, int32 hitID,
+                                 bool bBackface) {
   const float alphaScale = 1.0f / 255.0f;
-  // UNDONE: Pass ray down to determine backfacing?
-  // Vector normal( tri.m_flNx, tri.m_flNy, tri.m_flNz );
-  // bool bBackface = DotProduct(delta, tri.N) > 0 ? true : false;
   Vector coords(b0, b1, b2);
-  return alphaScale * g_ShadowTextureList.SampleMaterial(
-                          g_RtEnv.GetTriangleMaterial(hitID), coords, false);
+  return alphaScale *
+         g_ShadowTextureList.SampleMaterial(g_RtEnv.GetTriangleMaterial(hitID),
+                                            coords, bBackface);
 }
 
 int LoadShadowTexture(const char *pMaterialName, bool *pIsTranslucent,
-                      bool *pIsAlphaTest) {
+                      bool *pIsAlphaTest, bool *pIsPassBullets) {
   int nIndex = -1;
   // TexDataStringTable_GetString returns e.g. "metal/metalfence007a".
   // We need the full path "materials/metal/metalfence007a.vmt" for the
@@ -906,7 +921,7 @@ int LoadShadowTexture(const char *pMaterialName, bool *pIsTranslucent,
   Q_strncat(szPath, ".vmt", sizeof(szPath), COPY_ALL_CHARACTERS);
   Q_FixSlashes(szPath, CORRECT_PATH_SEPARATOR);
   bool bFound = g_ShadowTextureList.FindOrLoadIfValid(
-      szPath, &nIndex, pIsTranslucent, pIsAlphaTest);
+      szPath, &nIndex, pIsTranslucent, pIsAlphaTest, pIsPassBullets);
   return bFound ? nIndex : -1;
 }
 
@@ -2021,6 +2036,11 @@ void CVradStaticPropMgr::AddPolysForRayTrace(void) {
           int shadowTextureIndex = -1;
           if (dict.m_textureShadowIndex.Count()) {
             shadowTextureIndex = dict.m_textureShadowIndex[pMesh->material];
+          }
+          if (shadowTextureIndex >= 0) {
+            Msg("  Prop %d mesh %d: material=%d shadowTexIdx=%d texName='%s'\n",
+                nProp, nMesh, pMesh->material, shadowTextureIndex,
+                pTxtr->pszName());
           }
 
           OptimizedModel::MeshHeader_t *pVtxMesh = pVtxLOD->pMesh(nMesh);

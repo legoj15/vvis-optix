@@ -280,6 +280,8 @@ extern bool g_bTextureShadows;
 extern bool g_bWorldTextureShadows;
 extern bool g_bTranslucentShadows;
 extern bool g_bAllTextureShadows;
+extern bool g_bBackfaceWTShadowCull;
+extern bool g_bFrontfaceWTShadowCull;
 extern bool g_bShowStaticPropNormals;
 extern bool g_bDisablePropSelfShadowing;
 
@@ -298,7 +300,8 @@ extern void ForceTextureShadowsOnModel(const char *pModelName);
 extern bool IsModelTextureShadowsForced(const char *pModelName);
 extern int LoadShadowTexture(const char *pMaterialName,
                              bool *pIsTranslucent = nullptr,
-                             bool *pIsAlphaTest = nullptr);
+                             bool *pIsAlphaTest = nullptr,
+                             bool *pIsPassBullets = nullptr);
 extern int AddShadowTextureTriangle(int shadowTextureIndex, const Vector2D &t0,
                                     const Vector2D &t1, const Vector2D &t2);
 extern float ComputeShadowTextureCoverage(int shadowTextureIndex,
@@ -657,7 +660,7 @@ extern DispTested_t s_DispTested[MAX_TOOL_THREADS + 1];
 IVradStaticPropMgr *StaticPropMgr();
 
 extern float ComputeCoverageFromTexture(float b0, float b1, float b2,
-                                        int32 hitID);
+                                        int32 hitID, bool bBackface);
 
 #ifdef VRAD_RTX_CUDA_SUPPORT
 extern void UploadTextureShadowDataToGPU();
