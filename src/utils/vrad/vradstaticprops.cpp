@@ -232,6 +232,11 @@ static void GenerateLightmapSamplesForMesh(
     OptimizedModel::ModelHeader_t *_pVtxModel, int _meshID,
     CComputeStaticPropLightingResults *_pResults);
 
+// Analyze a model's UV layout for lightmap overlap (forward decl).
+static float AnalyzeUVOverlap(studiohdr_t *_pStudioHdr,
+                              OptimizedModel::FileHeader_t *_pVtxHdr,
+                              int _lightmapResX, int _lightmapResY);
+
 // Debug function, converts lightmaps to linear space then dumps them out.
 // TODO: Write out the file in a .dds instead of a .tga, in whatever format
 // we're supposed to use.
@@ -297,6 +302,8 @@ private:
                                              // this model casts texture shadows
     Vector m_vReflectivity; // Average reflectivity from materials
     CUtlVector<Vector> m_MaterialReflectivity; // Per-material reflectivity
+    float m_flUVOverlapFraction; // Fraction of lightmap texels with UV overlap
+                                 // (-1 = not computed)
   };
 
   struct MeshData_t {
@@ -1149,6 +1156,7 @@ void CVradStaticPropMgr::CreateCollisionModel(char const *pModelName) {
   m_StaticPropDict[i].m_pModel = NULL;
   m_StaticPropDict[i].m_pStudioHdr = NULL;
   m_StaticPropDict[i].m_vReflectivity.Init(0.18f, 0.18f, 0.18f);
+  m_StaticPropDict[i].m_flUVOverlapFraction = -1.0f;
 
   if (!LoadStudioModel(pModelName, buf)) {
     VectorCopy(vec3_origin, m_StaticPropDict[i].m_Mins);
@@ -1582,6 +1590,25 @@ void CVradStaticPropMgr::ComputeLighting(
 
   if (!withVertexLighting && !withTexelLighting)
     return;
+
+  // --- UV overlap analysis (runs once per unique model) ---
+  if (withTexelLighting && dict.m_flUVOverlapFraction < 0.0f) {
+    OptimizedModel::FileHeader_t *pVtxHdrForAnalysis =
+        (OptimizedModel::FileHeader_t *)dict.m_VtxBuf.Base();
+    if (pStudioHdr && pVtxHdrForAnalysis) {
+      dict.m_flUVOverlapFraction = AnalyzeUVOverlap(
+          pStudioHdr, pVtxHdrForAnalysis, prop.m_LightmapImageWidth,
+          prop.m_LightmapImageHeight);
+
+      if (dict.m_flUVOverlapFraction > 0.0f) {
+        Warning("Static prop %d (%s) at (%.0f, %.0f, %.0f): %.1f%% UV overlap "
+                "-- lightmap quality may be degraded\n",
+                prop_index, pStudioHdr->pszName(), prop.m_Origin.x,
+                prop.m_Origin.y, prop.m_Origin.z,
+                dict.m_flUVOverlapFraction * 100.0f);
+      }
+    }
+  }
 
   const int skip_prop = (g_bDisablePropSelfShadowing ||
                          (prop.m_Flags & STATIC_PROP_NO_SELF_SHADOWING))
@@ -2073,6 +2100,91 @@ void CVradStaticPropMgr::ComputeLighting(int iThread) {
   SerializeLighting();
 
   EndPacifier(true);
+
+  // --- UV Overlap Summary Report ---
+  {
+    int nTexelLightingProps = 0;
+    int nOverlapProps = 0;
+    int nSevereOverlapProps = 0;
+    int nOverlapModels = 0;
+    int nSevereOverlapModels = 0;
+
+    // Per-model stats for the report
+    struct ModelOverlapInfo {
+      const char *pszName;
+      float flOverlap;
+      int nInstances;
+    };
+    CUtlVector<ModelOverlapInfo> modelStats;
+
+    // Gather per-model overlap data from the dict cache
+    for (int d = 0; d < m_StaticPropDict.Count(); ++d) {
+      float frac = m_StaticPropDict[d].m_flUVOverlapFraction;
+      if (frac < 0.0f)
+        continue; // was never analyzed (no texel-lit instances)
+
+      // Count instances of this model
+      int instances = 0;
+      for (int p = 0; p < count; ++p) {
+        if (m_StaticProps[p].m_ModelIdx == d &&
+            !(m_StaticProps[p].m_Flags & STATIC_PROP_NO_PER_TEXEL_LIGHTING))
+          instances++;
+      }
+      if (instances == 0)
+        continue;
+
+      if (frac > 0.0f) {
+        nOverlapModels++;
+        nOverlapProps += instances;
+      }
+      if (frac > 0.5f) {
+        nSevereOverlapModels++;
+        nSevereOverlapProps += instances;
+      }
+
+      ModelOverlapInfo info;
+      info.pszName = m_StaticPropDict[d].m_pStudioHdr
+                         ? m_StaticPropDict[d].m_pStudioHdr->pszName()
+                         : "<unknown>";
+      info.flOverlap = frac;
+      info.nInstances = instances;
+      modelStats.AddToTail(info);
+
+      nTexelLightingProps += instances;
+    }
+
+    // Sort by overlap fraction descending
+    for (int a = 0; a < modelStats.Count(); ++a) {
+      for (int b = a + 1; b < modelStats.Count(); ++b) {
+        if (modelStats[b].flOverlap > modelStats[a].flOverlap) {
+          ModelOverlapInfo tmp = modelStats[a];
+          modelStats[a] = modelStats[b];
+          modelStats[b] = tmp;
+        }
+      }
+    }
+
+    Msg("\n--- Static Prop Lightmap UV Overlap Report ---\n");
+    Msg("  %d / %d props have per-texel lighting enabled\n",
+        nTexelLightingProps, count);
+    Msg("  %d props (%d unique models) have UV overlap > 0%%\n", nOverlapProps,
+        nOverlapModels);
+    Msg("  %d props (%d unique models) have UV overlap > 50%%\n",
+        nSevereOverlapProps, nSevereOverlapModels);
+
+    if (modelStats.Count() > 0) {
+      Msg("  Models with overlap:\n");
+      int nShow = min(modelStats.Count(), 20);
+      for (int m = 0; m < nShow; ++m) {
+        if (modelStats[m].flOverlap <= 0.0f)
+          break;
+        Msg("    %s: %.1f%% overlap (used by %d props)\n",
+            modelStats[m].pszName, modelStats[m].flOverlap * 100.0f,
+            modelStats[m].nInstances);
+      }
+    }
+    Msg("--- End UV Overlap Report ---\n\n");
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -2530,6 +2642,131 @@ inline float ComputeBarycentricDistanceToTri(Vector _barycentricCoord,
   Vector2D &second = _v[(minIndex + 2) % 3];
 
   return CalcDistanceToLineSegment2D(realPos, first, second);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Analyze a model's UV layout for lightmap overlap.
+// Returns the fraction of occupied texels that are claimed by multiple
+// triangles with significantly different world-space normals. This tells us
+// how much UV sharing will corrupt the lightmap.
+// ------------------------------------------------------------------------------------------------
+static float AnalyzeUVOverlap(studiohdr_t *_pStudioHdr,
+                              OptimizedModel::FileHeader_t *_pVtxHdr,
+                              int _lightmapResX, int _lightmapResY) {
+  if (_lightmapResX <= 0 || _lightmapResY <= 0)
+    return 0.0f;
+
+  const int totalPixels = _lightmapResX * _lightmapResY;
+
+  // Per-texel tracking: which triangle first claimed it, and its normal.
+  struct TexelClaim {
+    bool claimed;
+    bool conflicted; // already counted as a conflict
+    Vector normal;   // normal of the first triangle to claim this texel
+  };
+
+  CUtlVector<TexelClaim> claims;
+  claims.SetCount(totalPixels);
+  memset(claims.Base(), 0, totalPixels * sizeof(TexelClaim));
+
+  int totalClaimed = 0;
+  int totalConflicts = 0;
+
+  // Iterate all body parts / models / meshes — same traversal as
+  // GenerateLightmapSamplesForMesh but without lighting.
+  for (int bodyID = 0; bodyID < _pStudioHdr->numbodyparts; ++bodyID) {
+    OptimizedModel::BodyPartHeader_t *pVtxBodyPart =
+        _pVtxHdr->pBodyPart(bodyID);
+    mstudiobodyparts_t *pBodyPart = _pStudioHdr->pBodypart(bodyID);
+
+    for (int modelID = 0; modelID < pBodyPart->nummodels; ++modelID) {
+      OptimizedModel::ModelHeader_t *pVtxModel = pVtxBodyPart->pModel(modelID);
+      mstudiomodel_t *pStudioModel = pBodyPart->pModel(modelID);
+
+      // LOD 0 only — same as the lightmap generator.
+      int nLod = 0;
+      OptimizedModel::ModelLODHeader_t *pVtxLOD = pVtxModel->pLOD(nLod);
+
+      for (int meshID = 0; meshID < pStudioModel->nummeshes; ++meshID) {
+        mstudiomesh_t *pMesh = pStudioModel->pMesh(meshID);
+        OptimizedModel::MeshHeader_t *pVtxMesh = pVtxLOD->pMesh(meshID);
+        const mstudio_meshvertexdata_t *vertData =
+            pMesh->GetVertexData((void *)_pStudioHdr);
+        if (!vertData)
+          continue;
+
+        for (int nGroup = 0; nGroup < pVtxMesh->numStripGroups; ++nGroup) {
+          OptimizedModel::StripGroupHeader_t *pStripGroup =
+              pVtxMesh->pStripGroup(nGroup);
+
+          for (int nStrip = 0; nStrip < pStripGroup->numStrips; nStrip++) {
+            OptimizedModel::StripHeader_t *pStrip = pStripGroup->pStrip(nStrip);
+            if (!(pStrip->flags & OptimizedModel::STRIP_IS_TRILIST))
+              continue;
+
+            for (int i = 0; i < pStrip->numIndices; i += 3) {
+              int idx = pStrip->indexOffset + i;
+
+              unsigned short i1 = *pStripGroup->pIndex(idx);
+              unsigned short i2 = *pStripGroup->pIndex(idx + 1);
+              unsigned short i3 = *pStripGroup->pIndex(idx + 2);
+
+              int vertex1 = pStripGroup->pVertex(i1)->origMeshVertID;
+              int vertex2 = pStripGroup->pVertex(i2)->origMeshVertID;
+              int vertex3 = pStripGroup->pVertex(i3)->origMeshVertID;
+
+              // Compute face normal in model space for conflict detection.
+              Vector p0 = *vertData->Position(vertex1);
+              Vector p1 = *vertData->Position(vertex2);
+              Vector p2 = *vertData->Position(vertex3);
+              Vector edge1 = p1 - p0;
+              Vector edge2 = p2 - p0;
+              Vector faceNormal;
+              CrossProduct(edge1, edge2, faceNormal);
+              VectorNormalize(faceNormal);
+
+              Vector2D texcoord[3] = {*vertData->Texcoord(vertex1),
+                                      *vertData->Texcoord(vertex2),
+                                      *vertData->Texcoord(vertex3)};
+
+              Rasterizer rasterizer(texcoord[0], texcoord[1], texcoord[2],
+                                    _lightmapResX, _lightmapResY);
+
+              for (auto it = rasterizer.begin(); it != rasterizer.end(); ++it) {
+                if (!it->insideTriangle)
+                  continue;
+
+                size_t linearPos = rasterizer.GetLinearPos(it);
+                if (linearPos >= (size_t)totalPixels)
+                  continue;
+
+                TexelClaim &claim = claims[(int)linearPos];
+                if (!claim.claimed) {
+                  claim.claimed = true;
+                  claim.normal = faceNormal;
+                  totalClaimed++;
+                } else if (!claim.conflicted) {
+                  // Another triangle wants this texel.
+                  // Only count as a conflict if the normals differ
+                  // significantly (dot < 0.5 ≈ >60° apart).
+                  float dot = DotProduct(claim.normal, faceNormal);
+                  if (dot < 0.5f) {
+                    claim.conflicted = true;
+                    totalConflicts++;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (totalClaimed == 0)
+    return 0.0f;
+
+  return (float)totalConflicts / (float)totalClaimed;
 }
 
 // ------------------------------------------------------------------------------------------------
