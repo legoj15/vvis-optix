@@ -91,6 +91,7 @@ char vismatfile[_MAX_PATH] = "";
 bool g_bPrecision = false;
 bool g_bStaticPropBounce = false;
 float g_flStaticPropBounceBoost = 1.0f;
+bool g_bStaticPropBouncePrecise = false;
 bool g_bUseAVX2 = false;
 char incrementfile[_MAX_PATH] = "";
 
@@ -706,7 +707,11 @@ void MakePatches(void) {
 
   // make static prop patches for light bouncing
   if (g_bStaticPropBounce) {
-    StaticPropMgr()->MakePatches();
+    if (g_bStaticPropBouncePrecise) {
+      StaticPropMgr()->MakePatchesPrecise();
+    } else {
+      StaticPropMgr()->MakePatches();
+    }
   }
 }
 
@@ -3070,13 +3075,14 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
     } else if (!Q_stricmp(argv[i], "-precision")) {
       g_bPrecision = true;
     } else if (!Q_stricmp(argv[i], "-StaticPropBounce")) {
-      if (i + 1 < argc) {
+      // Optional numeric argument: -StaticPropBounce [scale]
+      // If no number follows (or next arg is a flag), defaults to 1.0
+      if (i + 1 < argc && argv[i + 1][0] != '-') {
         g_flStaticPropBounceBoost = (float)atof(argv[++i]);
-      } else {
-        Warning("Error: expected bounce scale after '-StaticPropBounce'\n");
-        return -1;
       }
       g_bStaticPropBounce = true;
+    } else if (!Q_stricmp(argv[i], "-StaticPropBouncePrecise")) {
+      g_bStaticPropBouncePrecise = true;
     } else if (!Q_stricmp(argv[i], "-avx2")) {
       g_bUseAVX2 = true;
     } else if (!Q_stricmp(argv[i], "-nocuda")) {

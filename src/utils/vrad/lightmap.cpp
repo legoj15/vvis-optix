@@ -4582,7 +4582,8 @@ void BuildStaticPropPatchlights(int iThread, int nPatch) {
   Vector vecOrigin = patch.winding->p[0];
   Vector vecU = patch.winding->p[2] - patch.winding->p[0];
   Vector vecV = patch.winding->p[1] - patch.winding->p[0];
-  int nSampleCount = max(1, int(patch.area / 16.0f));
+  int nSampleCount =
+      max(1, int(patch.area / (g_bStaticPropBouncePrecise ? 4.0f : 16.0f)));
   float flSampleFrac = 1.0f / float(nSampleCount);
 
   for (int i = 0; i < nSampleCount; i++) {

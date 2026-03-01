@@ -297,6 +297,7 @@ extern bool g_bPrecision;
 // Static prop light bounce: allow static props to bounce indirect light
 extern bool g_bStaticPropBounce;
 extern float g_flStaticPropBounceBoost;
+extern bool g_bStaticPropBouncePrecise;
 
 // AVX2 mode: use FMA3/SSE4.1 SIMD instructions (opt-in via -avx2 flag)
 extern bool g_bUseAVX2;
@@ -666,6 +667,7 @@ public:
   virtual void ComputeLighting(int iThread) = 0;
   virtual void AddPolysForRayTrace() = 0;
   virtual void MakePatches() = 0;
+  virtual void MakePatchesPrecise() = 0;
 };
 
 // extern PropTested_t s_PropTested[MAX_TOOL_THREADS+1];
