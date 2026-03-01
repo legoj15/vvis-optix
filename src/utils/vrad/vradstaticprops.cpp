@@ -666,18 +666,31 @@ public:
     int index = m_Textures.Find(pMaterialName);
     bool bFound = false;
     if (index != m_Textures.InvalidIndex()) {
-      if (pIsTranslucent)
-        *pIsTranslucent = m_Textures[*pIndex].bIsTranslucent;
-      if (pIsAlphaTest)
-        *pIsAlphaTest = m_Textures[*pIndex].bIsAlphaTest;
-      bFound = true;
       *pIndex = index;
+      if (pIsTranslucent)
+        *pIsTranslucent = m_Textures[index].bIsTranslucent;
+      if (pIsAlphaTest)
+        *pIsAlphaTest = m_Textures[index].bIsAlphaTest;
+      bFound = true;
     } else {
       KeyValues *pVMT = new KeyValues("vmt");
       CUtlBuffer buf(0, 0, CUtlBuffer::TEXT_BUFFER);
       LoadFileIntoBuffer(buf, pMaterialName);
       if (pVMT->LoadFromBuffer(pMaterialName, buf)) {
         bFound = true;
+
+        // Skip materials with %compilenodraw (e.g. toolsnodraw, toolsinvisible)
+        KeyValues *pCompileNoDraw = pVMT->FindKey("%compilenodraw");
+        if (pCompileNoDraw && pCompileNoDraw->GetInt() != 0) {
+          // If also %compilepassbullets (toolsinvisible), signal "no shadow at
+          // all" with -2. This prevents any shadow including opaque fallback.
+          KeyValues *pPassBullets = pVMT->FindKey("%compilepassbullets");
+          if (pPassBullets && pPassBullets->GetInt() != 0) {
+            *pIndex = -2;
+          }
+          pVMT->deleteThis();
+          return bFound;
+        }
 
         bool bIsTranslucentLocal = pVMT->FindKey("$translucent") != nullptr;
         bool bIsAlphaTestLocal = pVMT->FindKey("$alphatest") != nullptr;
@@ -873,8 +886,16 @@ float ComputeCoverageFromTexture(float b0, float b1, float b2, int32 hitID) {
 int LoadShadowTexture(const char *pMaterialName, bool *pIsTranslucent,
                       bool *pIsAlphaTest) {
   int nIndex = -1;
+  // TexDataStringTable_GetString returns e.g. "metal/metalfence007a".
+  // We need the full path "materials/metal/metalfence007a.vmt" for the
+  // filesystem.
+  char szPath[MAX_PATH];
+  Q_strncpy(szPath, "materials/", sizeof(szPath));
+  Q_strncat(szPath, pMaterialName, sizeof(szPath), COPY_ALL_CHARACTERS);
+  Q_strncat(szPath, ".vmt", sizeof(szPath), COPY_ALL_CHARACTERS);
+  Q_FixSlashes(szPath, CORRECT_PATH_SEPARATOR);
   bool bFound = g_ShadowTextureList.FindOrLoadIfValid(
-      pMaterialName, &nIndex, pIsTranslucent, pIsAlphaTest);
+      szPath, &nIndex, pIsTranslucent, pIsAlphaTest);
   return bFound ? nIndex : -1;
 }
 

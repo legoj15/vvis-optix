@@ -140,6 +140,7 @@ bool g_bStaticPropPolys = false;
 bool g_bTextureShadows = false;
 bool g_bWorldTextureShadows = false;
 bool g_bTranslucentShadows = false;
+bool g_bAllTextureShadows = false;
 bool g_bDisablePropSelfShadowing = false;
 
 // Dedicated heap for transfer list allocations.  HeapDestroy releases all
@@ -2988,6 +2989,11 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       g_bTranslucentShadows = true;
       g_bWorldTextureShadows = true; // Implicitly required
       g_bTextureShadows = true;      // Implicitly required
+    } else if (!Q_stricmp(argv[i], "-alltextureshadows")) {
+      g_bAllTextureShadows = true;
+      g_bTranslucentShadows = true; // Implicitly required
+      g_bWorldTextureShadows = true;
+      g_bTextureShadows = true;
     } else if (!Q_stricmp(argv[i], "-cuda") || !Q_stricmp(argv[i], "-rtx")) {
       g_bUseGPU = true;
     } else if (!Q_stricmp(argv[i], "-gpuraybatch")) {
@@ -3363,6 +3369,8 @@ void PrintUsage(int argc, char **argv) {
       "texture shadows\n"
       "  -translucentshadows : Allows $translucent world brush textures to "
       "cast texture shadows\n"
+      "  -alltextureshadows : All alphatest/translucent materials cast shadows "
+      "(excludes %%compilenodraw)\n"
       "  -noskyboxrecurse : Turn off recursion into 3d skybox (skybox shadows "
       "on world)\n"
       "  -nossprops      : Globally disable self-shadowing on static props\n"

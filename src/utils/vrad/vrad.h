@@ -279,6 +279,7 @@ extern bool g_bStaticPropPolys;
 extern bool g_bTextureShadows;
 extern bool g_bWorldTextureShadows;
 extern bool g_bTranslucentShadows;
+extern bool g_bAllTextureShadows;
 extern bool g_bShowStaticPropNormals;
 extern bool g_bDisablePropSelfShadowing;
 

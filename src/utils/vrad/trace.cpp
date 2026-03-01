@@ -642,15 +642,33 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
   int materialIndexList[256];
   bool bTextureShadows = false;
 
-  if (!(pBrush->contents & MASK_OPAQUE) &&
-      !(g_bTextureShadows && (pBrush->contents & CONTENTS_GRATE)))
+  // Determine if we should even consider this brush.
+  // Original logic: must be MASK_OPAQUE or (textureshadows && CONTENTS_GRATE).
+  // Extended: with -worldtextureshadows or -translucentshadows, we also accept
+  // any MASK_OPAQUE brush because it may have alphatest/translucent faces.
+  bool bIsGrate = (pBrush->contents & CONTENTS_GRATE) != 0;
+  bool bIsOpaque = (pBrush->contents & MASK_OPAQUE) != 0;
+  bool bWorldShadowsActive = g_bWorldTextureShadows || g_bTranslucentShadows;
+
+  if (!bIsOpaque && !(g_bTextureShadows && bIsGrate))
     return;
 
   if (pBrush->contents & CONTENTS_LADDER)
     return;
 
-  if (g_bTextureShadows && (pBrush->contents & CONTENTS_GRATE) &&
-      pBrush->numsides < ARRAYSIZE(materialIndexList)) {
+  // Probe materials for texture shadows when any texture shadow mode is active.
+  // For CONTENTS_GRATE brushes, the original -textureshadows flag is
+  // sufficient. For all other opaque brushes, we need -worldtextureshadows or
+  // -translucentshadows. With -alltextureshadows, probe everything.
+  bool bShouldProbe = false;
+  if (g_bTextureShadows && bIsGrate)
+    bShouldProbe = true;
+  if (bWorldShadowsActive && bIsOpaque)
+    bShouldProbe = true;
+  if (g_bAllTextureShadows)
+    bShouldProbe = true;
+
+  if (bShouldProbe && pBrush->numsides < ARRAYSIZE(materialIndexList)) {
     for (int i = 0; i < pBrush->numsides; i++) {
       dbrushside_t *side = &dbrushsides[pBrush->firstside + i];
       texinfo_t *tx = &texinfo[side->texinfo];
@@ -667,6 +685,9 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
       // properties
       if (materialIndexList[i] >= 0) {
         bool bAllowShadow = false;
+        // CONTENTS_GRATE brushes: original -textureshadows behavior
+        if (bIsGrate)
+          bAllowShadow = true;
         // From Valve wiki: "-worldtextureshadows" handles alphatest,
         // "-translucentshadows" handles translucent.
         if (bIsAlphaTest && g_bWorldTextureShadows)
@@ -693,6 +714,13 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
     if (tx->flags & SURF_SKY || side->dispinfo)
       continue;
 
+    // If this brush has transparent texture shadows, skip NODRAW faces
+    // entirely. Without this, the NODRAW sides of a fence brush cast an opaque
+    // blocky shadow that defeats the purpose of the texture shadow on the
+    // visible face.
+    if (bTextureShadows && (tx->flags & SURF_NODRAW))
+      continue;
+
     for (int j = 0; j < pBrush->numsides && w; j++) {
       if (i == j)
         continue;
@@ -703,6 +731,14 @@ void AddBrushToRaytraceEnvironment(dbrush_t *pBrush, const VMatrix &xform) {
       ChopWindingInPlace(&w, plane->normal, plane->dist, 0);
     }
     if (w) {
+      // -2 = material flagged as "no shadow at all" (e.g. toolsinvisible:
+      // %compilenodraw + %compilepassbullets). Skip entirely.
+      // Use bShouldProbe (not bTextureShadows) because bTextureShadows is only
+      // true when at least one face has a valid shadow texture index.
+      if (bShouldProbe && materialIndexList[i] == -2) {
+        FreeWinding(w);
+        continue;
+      }
       if (bTextureShadows && materialIndexList[i] >= 0) {
         AddTexturedBrushWinding(w, xform, tx, materialIndexList[i]);
       } else {
