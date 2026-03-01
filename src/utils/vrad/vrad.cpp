@@ -3043,6 +3043,7 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       g_bDisablePropSelfShadowing = true;
     } else if (!Q_stricmp(argv[i], "-textureshadows")) {
       g_bTextureShadows = true;
+      g_bStaticPropPolys = true; // Implicitly required
     } else if (!Q_stricmp(argv[i], "-worldtextureshadows")) {
       g_bWorldTextureShadows = true;
       g_bTextureShadows = true; // Implicitly required
