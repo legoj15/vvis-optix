@@ -210,6 +210,8 @@ struct CPatch {
   int faceNumber;
   int clusterNumber;
 
+  int staticPropIdx; // >= 0 = static prop index, -1 = world/disp patch
+
   int parent; // patch index of parent
   int child1; // patch index for children
   int child2;
@@ -292,6 +294,10 @@ extern int g_nGPURayBatchSize; // Max rays per thread before GPU flush
 // Precision mode: higher-accuracy lighting calculations at the cost of speed
 extern bool g_bPrecision;
 
+// Static prop light bounce: allow static props to bounce indirect light
+extern bool g_bStaticPropBounce;
+extern float g_flStaticPropBounceBoost;
+
 // AVX2 mode: use FMA3/SSE4.1 SIMD instructions (opt-in via -avx2 flag)
 extern bool g_bUseAVX2;
 
@@ -314,6 +320,7 @@ extern float ComputeShadowTextureCoverage(int shadowTextureIndex,
 #define TRACE_ID_SKY 0x01000000        // sky face ray blocker
 #define TRACE_ID_OPAQUE 0x02000000     // everyday light blocking face
 #define TRACE_ID_STATICPROP 0x04000000 // static prop - lower bits are prop ID
+#define TRACE_ID_PATCH 0x08000000 // radiosity patch - lower bits are patch ID
 extern RayTracingEnvironment g_RtEnv;
 
 void MakeShadowSplits(void);
@@ -323,6 +330,7 @@ void MakeShadowSplits(void);
 void BuildVisMatrix(void);
 void BuildClusterTable(void);
 void AddDispsToClusterTable(void);
+void AddStaticPropPatchesToClusterTable(void);
 void FreeVisMatrix(void);
 // qboolean CheckVisBit (unsigned int p1, unsigned int p2);
 void TouchVMFFile(void);
@@ -379,6 +387,11 @@ qboolean IsIncremental(char *filename);
 int SaveIncremental(char *filename);
 int PartialHead(void);
 void BuildFacelights(int facenum, int threadnum);
+void BuildStaticPropPatchlights(int iThread, int nPatch);
+void ComputeDirectLightingAtPoint(Vector &position, Vector &normal,
+                                  Vector &outColor, int iThread,
+                                  int static_prop_id_to_skip = -1,
+                                  int nLFlags = 0);
 void PrecompLightmapOffsets();
 void FinalLightFace(int threadnum, int facenum);
 void PvsForOrigin(Vector &org, byte *pvs);
@@ -652,6 +665,7 @@ public:
   virtual void Shutdown() = 0;
   virtual void ComputeLighting(int iThread) = 0;
   virtual void AddPolysForRayTrace() = 0;
+  virtual void MakePatches() = 0;
 };
 
 // extern PropTested_t s_PropTested[MAX_TOOL_THREADS+1];

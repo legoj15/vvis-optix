@@ -347,6 +347,7 @@ private:
   void SerializeLighting();
   void AddPolysForRayTrace();
   void BuildTriList(CStaticProp &prop);
+  void MakePatches();
 };
 
 //-----------------------------------------------------------------------------
@@ -1247,8 +1248,7 @@ bool PositionInSolid(Vector &position) {
 //-----------------------------------------------------------------------------
 void ComputeDirectLightingAtPoint(Vector &position, Vector &normal,
                                   Vector &outColor, int iThread,
-                                  int static_prop_id_to_skip = -1,
-                                  int nLFlags = 0) {
+                                  int static_prop_id_to_skip, int nLFlags) {
   SSE_sampleLightOutput_t sampleOutput;
 
   outColor.Init();
@@ -2831,4 +2831,115 @@ static void DumpLightmapLinear(const char *_dstFilename,
                           (uint8 *)(linearBuffer.Base()),
                           _width *
                               ImageLoader::SizeInBytes(IMAGE_FORMAT_BGR888));
+}
+
+//-----------------------------------------------------------------------------
+// Static prop light bounce support (ported from CSGO)
+//-----------------------------------------------------------------------------
+
+extern float totalarea;
+extern unsigned num_degenerate_faces;
+
+void MakePatchForTriangle(winding_t *w, Vector vRefl, int nStaticPropIdx) {
+  float area;
+  CPatch *patch;
+
+  area = WindingArea(w);
+  if (area <= 0) {
+    num_degenerate_faces++;
+    return;
+  }
+
+  totalarea += area;
+
+  // get a patch
+  int ndxPatch = g_Patches.AddToTail();
+  patch = &g_Patches[ndxPatch];
+  memset(patch, 0, sizeof(CPatch));
+  patch->ndxNext = g_Patches.InvalidIndex();
+  patch->ndxNextParent = g_Patches.InvalidIndex();
+  patch->ndxNextClusterChild = g_Patches.InvalidIndex();
+  patch->child1 = g_Patches.InvalidIndex();
+  patch->child2 = g_Patches.InvalidIndex();
+  patch->parent = g_Patches.InvalidIndex();
+  patch->needsBumpmap = false;
+  patch->staticPropIdx = nStaticPropIdx;
+
+  patch->scale[0] = patch->scale[1] = 1.0f;
+  patch->area = area;
+  patch->sky = false;
+
+  // chop scaled up lightmaps coarser
+  patch->luxscale = 16.0f;
+  patch->chop = maxchop;
+
+  patch->winding = w;
+
+  patch->plane = new dplane_t;
+
+  Vector vecNormal;
+  CrossProduct(w->p[2] - w->p[0], w->p[1] - w->p[0], vecNormal);
+  VectorNormalize(vecNormal);
+  VectorCopy(vecNormal, patch->plane->normal);
+
+  patch->plane->dist = vecNormal.Dot(w->p[0]);
+  patch->plane->type = 3; // PLANE_ANYZ - not critical, just informational
+  patch->planeDist = patch->plane->dist;
+
+  patch->faceNumber = -1; // Sentinel: identifies this as a static prop patch
+  WindingCenter(w, patch->origin);
+
+  VectorCopy(patch->plane->normal, patch->normal);
+
+  WindingBounds(w, patch->face_mins, patch->face_maxs);
+  VectorCopy(patch->face_mins, patch->mins);
+  VectorCopy(patch->face_maxs, patch->maxs);
+
+  patch->baselight.Init(0.0f, 0.0f, 0.0f);
+  patch->basearea = 1;
+  patch->reflectivity = vRefl;
+}
+
+void CVradStaticPropMgr::MakePatches() {
+  int count = m_StaticProps.Count();
+  if (!count) {
+    return;
+  }
+
+  int nPatchCount = 0;
+
+  // Default reflectivity for all static props
+  // TODO: compute per-material reflectivity from VMTs
+  Vector vDefaultReflectivity(0.5f, 0.5f, 0.5f);
+
+  for (int nProp = 0; nProp < count; ++nProp) {
+    CStaticProp &prop = m_StaticProps[nProp];
+    StaticPropDict_t &dict = m_StaticPropDict[prop.m_ModelIdx];
+
+    if (dict.m_pModel) {
+      // Get collision model triangles, transform to world space
+      VMatrix xform;
+      xform.SetupMatrixOrgAngles(prop.m_Origin, prop.m_Angles);
+      ICollisionQuery *queryModel =
+          s_pPhysCollision->CreateQueryModel(dict.m_pModel);
+      for (int nConvex = 0; nConvex < queryModel->ConvexCount(); ++nConvex) {
+        for (int nTri = 0; nTri < queryModel->TriangleCount(nConvex); ++nTri) {
+          Vector verts[3];
+          queryModel->GetTriangleVerts(nConvex, nTri, verts);
+          for (int nVert = 0; nVert < 3; ++nVert)
+            verts[nVert] = xform.VMul4x3(verts[nVert]);
+
+          winding_t *w = AllocWinding(3);
+          for (int i = 0; i < 3; i++) {
+            w->p[i] = verts[i];
+          }
+          w->numpoints = 3;
+          MakePatchForTriangle(w, vDefaultReflectivity, nProp);
+          nPatchCount++;
+        }
+      }
+      s_pPhysCollision->DestroyQueryModel(queryModel);
+    }
+  }
+  qprintf("%i static prop patches\n", nPatchCount);
 }

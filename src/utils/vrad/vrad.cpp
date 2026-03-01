@@ -89,6 +89,8 @@ char level_lights[MAX_PATH] = "";
 char vismatfile[_MAX_PATH] = "";
 
 bool g_bPrecision = false;
+bool g_bStaticPropBounce = false;
+float g_flStaticPropBounceBoost = 1.0f;
 bool g_bUseAVX2 = false;
 char incrementfile[_MAX_PATH] = "";
 
@@ -527,6 +529,7 @@ void MakePatchForFace(int fn, winding_t *w) {
   patch->child2 = g_Patches.InvalidIndex();
   patch->parent = g_Patches.InvalidIndex();
   patch->needsBumpmap = tx->flags & SURF_BUMPLIGHT ? true : false;
+  patch->staticPropIdx = -1; // not a static prop patch
 
   // link and save patch data
   patch->ndxNext = g_FacePatches.Element(fn);
@@ -700,6 +703,11 @@ void MakePatches(void) {
 
   // make the displacement surface patches
   StaticDispMgr()->MakePatches();
+
+  // make static prop patches for light bouncing
+  if (g_bStaticPropBounce) {
+    StaticPropMgr()->MakePatches();
+  }
 }
 
 /*
@@ -714,6 +722,11 @@ SUBDIVIDE
 // Purpose: does this surface take/emit light
 //-----------------------------------------------------------------------------
 bool PreventSubdivision(CPatch *patch) {
+  if (patch->faceNumber < 0) {
+    // static prop patch - never subdivide
+    return true;
+  }
+
   dface_t *f = g_pFaces + patch->faceNumber;
   texinfo_t *tx = &texinfo[f->texinfo];
 
@@ -888,6 +901,9 @@ void SubdividePatches(void) {
     CPatch *pCur = &g_Patches.Element(i);
     pCur->planeDist = pCur->plane->dist;
 
+    if (pCur->faceNumber < 0)
+      continue; // static prop patch - not linked to any face
+
     pCur->ndxNextParent = faceParents.Element(pCur->faceNumber);
     faceParents[pCur->faceNumber] = pCur - g_Patches.Base();
   }
@@ -915,6 +931,8 @@ void SubdividePatches(void) {
   uiPatchCount = g_Patches.Size();
   for (i = 0; i < uiPatchCount; i++) {
     CPatch *pCur = &g_Patches.Element(i);
+    if (pCur->faceNumber < 0)
+      continue; // static prop patch - not linked to any face
     pCur->ndxNext = g_FacePatches.Element(pCur->faceNumber);
     g_FacePatches[pCur->faceNumber] = pCur - g_Patches.Base();
 
@@ -1063,7 +1081,7 @@ void MakeTransfer(int ndxPatch1, int ndxPatch2, transfer_t *all_transfers)
   CPatch *pPatch1 = &g_Patches.Element(ndxPatch1);
   CPatch *pPatch2 = &g_Patches.Element(ndxPatch2);
 
-  if (IsSky(&g_pFaces[pPatch2->faceNumber]))
+  if (pPatch2->faceNumber >= 0 && IsSky(&g_pFaces[pPatch2->faceNumber]))
     return;
 
   // overflow check!
@@ -1509,7 +1527,8 @@ void GatherLight(int threadnum, void *pUserData) {
       double dbumpSum[NUM_BUMP_VECTS + 1][3];
 
       // Disps
-      bool bDisp = (g_pFaces[patch->faceNumber].dispinfo != -1);
+      bool bDisp = (patch->faceNumber >= 0 &&
+                    g_pFaces[patch->faceNumber].dispinfo != -1);
       if (bDisp) {
         normals[0] = patch->normal;
         texinfo_t *pTexinfo = &texinfo[g_pFaces[patch->faceNumber].texinfo];
@@ -1519,7 +1538,7 @@ void GatherLight(int threadnum, void *pUserData) {
         // use facenormal along with the smooth normal to build the three bump
         // map vectors
         GetBumpNormals(vecTexU, vecTexV, normals[0], normals[0], &normals[1]);
-      } else {
+      } else if (patch->faceNumber >= 0) {
         GetPhongNormal(patch->faceNumber, patch->origin, normals[0]);
 
         texinfo_t *pTexinfo = &texinfo[g_pFaces[patch->faceNumber].texinfo];
@@ -1528,6 +1547,10 @@ void GatherLight(int threadnum, void *pUserData) {
         GetBumpNormals(pTexinfo->textureVecsTexelsPerWorldUnits[0],
                        pTexinfo->textureVecsTexelsPerWorldUnits[1],
                        patch->normal, normals[0], &normals[1]);
+      } else {
+        // Static prop patch - use flat normal for all bump slots
+        for (int n = 0; n < NUM_BUMP_VECTS + 1; n++)
+          normals[n] = patch->normal;
       }
 
       // force the base lightmap to use the flat normal instead of the phong
@@ -1734,19 +1757,24 @@ static void BuildBounceCSR_GPU(void) {
 
       Vector normals[NUM_BUMP_VECTS + 1];
 
-      bool bDisp = (g_pFaces[patch->faceNumber].dispinfo != -1);
+      bool bDisp = (patch->faceNumber >= 0 &&
+                    g_pFaces[patch->faceNumber].dispinfo != -1);
       if (bDisp) {
         normals[0] = patch->normal;
         texinfo_t *pTexinfo = &texinfo[g_pFaces[patch->faceNumber].texinfo];
         Vector vecTexU, vecTexV;
         PreGetBumpNormalsForDisp(pTexinfo, vecTexU, vecTexV, normals[0]);
         GetBumpNormals(vecTexU, vecTexV, normals[0], normals[0], &normals[1]);
-      } else {
+      } else if (patch->faceNumber >= 0) {
         GetPhongNormal(patch->faceNumber, patch->origin, normals[0]);
         texinfo_t *pTexinfo = &texinfo[g_pFaces[patch->faceNumber].texinfo];
         GetBumpNormals(pTexinfo->textureVecsTexelsPerWorldUnits[0],
                        pTexinfo->textureVecsTexelsPerWorldUnits[1],
                        patch->normal, normals[0], &normals[1]);
+      } else {
+        // Static prop patch - use flat normal for all bump slots
+        for (int n = 0; n < NUM_BUMP_VECTS + 1; n++)
+          normals[n] = patch->normal;
       }
       // CPU forces normals[0] = patch->normal for base lightmap
       normals[0] = patch->normal;
@@ -2028,6 +2056,10 @@ void RadWorld_Start() {
   // add displacement faces to cluster table
   AddDispsToClusterTable();
 
+  if (g_bStaticPropBounce) {
+    AddStaticPropPatchesToClusterTable();
+  }
+
   // create directlights out of patches and lights
   {
     double t0 = Plat_FloatTime();
@@ -2153,6 +2185,18 @@ void MakeAllScales(void) {
   double transferMB =
       (double)total_transfer * sizeof(transfer_t) / (1024.0 * 1024.0);
   Msg("  transfer data: %.1f MB (%.1f GB)\n", transferMB, transferMB / 1024.0);
+
+  if (g_bStaticPropBounce) {
+    int nTransfers = 0;
+    for (int i = 0; i < g_Patches.Count(); i++) {
+      CPatch *pCur = &g_Patches.Element(i);
+      if (pCur->faceNumber >= 0) {
+        continue;
+      }
+      nTransfers += pCur->numtransfers;
+    }
+    Msg("static prop patch transfers %d\n", nTransfers);
+  }
 }
 
 // Helper function. This can be useful to visualize the world and faces and see
@@ -2260,6 +2304,13 @@ bool RadWorld_Go() {
       RunThreadsOnIndividual(numfaces, true, BuildFacelights);
     }
     double buildFacelightsTime = Plat_FloatTime() - phaseStart;
+
+    // Build direct lighting on static prop patches for bouncing
+    if (g_bStaticPropBounce) {
+      Msg("Computing direct lighting on static prop patches...\n");
+      RunThreadsOnIndividual(g_Patches.Count(), true,
+                             BuildStaticPropPatchlights);
+    }
 
     double gpuDirectTime = 0;
 #ifdef VRAD_RTX_CUDA_SUPPORT
@@ -3018,6 +3069,14 @@ int ParseCommandLine(int argc, char **argv, bool *onlydetail) {
       }
     } else if (!Q_stricmp(argv[i], "-precision")) {
       g_bPrecision = true;
+    } else if (!Q_stricmp(argv[i], "-StaticPropBounce")) {
+      if (i + 1 < argc) {
+        g_flStaticPropBounceBoost = (float)atof(argv[++i]);
+      } else {
+        Warning("Error: expected bounce scale after '-StaticPropBounce'\n");
+        return -1;
+      }
+      g_bStaticPropBounce = true;
     } else if (!Q_stricmp(argv[i], "-avx2")) {
       g_bUseAVX2 = true;
     } else if (!Q_stricmp(argv[i], "-nocuda")) {

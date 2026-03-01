@@ -1232,6 +1232,7 @@ void RayTraceOptiX::GatherLightGPU(const float *emitlight, float *addlight,
   params.faceNumber = s_d_faceNumber;
   params.addlightBump = s_d_addlightBump;
   params.numPatches = numPatches;
+  params.patchOffset = 0; // All patches in one batch, no offset needed
 
   const int blockSize = 256;
 
