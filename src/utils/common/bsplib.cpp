@@ -1683,7 +1683,9 @@ void ValidateLump(int lump, int length, int size, int forceVersion) {
   }
 
   if (forceVersion >= 0 && forceVersion != g_pBSPHeader->lumps[lump].version) {
-    Error("ValidateLump: old version for lump %d in map!", lump);
+    Warning("ValidateLump: version mismatch for lump %d in map (expected %d, "
+            "got %d) - skipping\n",
+            lump, forceVersion, g_pBSPHeader->lumps[lump].version);
   }
 }
 

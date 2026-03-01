@@ -64,3 +64,8 @@ $Project "vrad_launcher"
 	"utils\vrad_launcher\vrad_launcher.vpc" [$WINDOWS]
 }
 
+$Project "vrad_nextgen"
+{
+	"utils\vrad_nextgen\vrad_nextgen.vpc" [$WINDOWS]
+}
+
