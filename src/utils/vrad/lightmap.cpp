@@ -774,7 +774,7 @@ bool BuildFacesamples(lightinfo_t *pLightInfo, facelight_t *pFaceLight) {
 
   // allocate a large number of samples for creation -- get copied later!
   CUtlVector<sample_t> sampleData;
-  sampleData.SetCount(SINGLE_BRUSH_MAP * 2);
+  sampleData.SetCount((width * height) * 2);
   sample_t *samples = sampleData.Base();
   sample_t *pSamples = samples;
 
